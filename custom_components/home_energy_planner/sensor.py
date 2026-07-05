@@ -190,7 +190,7 @@ class ClimateTargetSensor(CoordinatorEntity[ClimateCoordinator], SensorEntity):
     """Computed space-heating target; every component in attributes."""
 
     _attr_has_entity_name = True
-    _attr_name = "Heating target"
+    _attr_name = "Heat pump target"
     _attr_native_unit_of_measurement = "°C"
     _attr_icon = "mdi:home-thermometer"
 
