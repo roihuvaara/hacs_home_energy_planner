@@ -40,6 +40,13 @@ RETRY_DELAYS_S = (2.0, 5.0)
 DEFAULT_REVERIFY_DELAY_S = 180.0
 VERIFY_EVENT = "home_energy_planner_slot_verification"
 NOTIFICATION_ID = "home_energy_planner_solis_writer"
+_GENERATION_KEY = "home_energy_planner_slot_apply_generation"
+
+
+def _bump_generation(hass: HomeAssistant) -> int:
+    generation = hass.data.get(_GENERATION_KEY, 0) + 1
+    hass.data[_GENERATION_KEY] = generation
+    return generation
 
 
 def discover_slot_prefix(hass: HomeAssistant) -> str:
@@ -243,6 +250,7 @@ async def apply_slots(
         desired_charge, actual_charge, "charge"
     ) + diff_tables(desired_discharge, actual_discharge, "discharge")
 
+    generation = _bump_generation(hass)
     if ops and reverify_delay_s > 0:
         _schedule_reverify(
             hass,
@@ -250,6 +258,7 @@ async def apply_slots(
             desired_charge=desired_charge,
             desired_discharge=desired_discharge,
             delay_s=reverify_delay_s,
+            generation=generation,
         )
 
     return {
@@ -274,8 +283,14 @@ def _schedule_reverify(
     desired_charge: list[SlotSpec],
     desired_discharge: list[SlotSpec],
     delay_s: float,
+    generation: int,
 ) -> None:
     async def _reverify(_now: Any) -> None:
+        if hass.data.get(_GENERATION_KEY, 0) != generation:
+            _LOGGER.debug(
+                "Skipping stale re-verify (generation %d superseded)", generation
+            )
+            return
         actual_charge = read_slot_table(hass, prefix, "charge")
         actual_discharge = read_slot_table(hass, prefix, "discharge")
         mismatches = diff_tables(desired_charge, actual_charge, "charge") + diff_tables(
