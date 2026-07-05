@@ -212,3 +212,11 @@ versati_cool_trial:
           min: 14
           max: 25
           step: 0.5
+
+health_check:
+  name: Planner health check
+  description: >-
+    Run the self-monitoring checks on demand and return the snapshot and
+    any active issues (stale prices, dead input sensors, failing inverter
+    applies, LP engine fallback). The same checks run automatically twice
+    an hour and notify once per issue per day.

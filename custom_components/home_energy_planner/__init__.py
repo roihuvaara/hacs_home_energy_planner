@@ -41,13 +41,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await ilp.async_refresh()
         ilp.async_schedule_ticks()
 
+    from .watchdog import PlannerWatchdog
+
+    watchdog = PlannerWatchdog(hass, entry.entry_id)
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "pricing": coordinator,
         "battery": battery,
         "climate": climate,
         "water_heater": water_heater,
         "ilp": ilp,
+        "watchdog": watchdog,
     }
+
+    from homeassistant.helpers.event import async_track_time_change
+    from homeassistant.util import dt as dt_util
+
+    async def _watchdog_tick(_now) -> None:
+        await watchdog.async_check(dt_util.now())
+
+    entry.async_on_unload(
+        async_track_time_change(hass, _watchdog_tick, minute=[7, 37], second=0)
+    )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     _async_register_services(hass)
@@ -129,9 +144,20 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 )
         raise HomeAssistantError("home_energy_planner is not set up")
 
+    async def handle_health_check(call: ServiceCall) -> ServiceResponse:
+        from homeassistant.util import dt as dt_util
+
+        for bundle in hass.data.get(DOMAIN, {}).values():
+            if isinstance(bundle, dict) and "watchdog" in bundle:
+                return await bundle["watchdog"].async_check(dt_util.now())
+        raise HomeAssistantError("home_energy_planner is not set up")
+
     hass.services.async_register(DOMAIN, "set_mode", handle_set_mode)
     hass.services.async_register(
         DOMAIN, "versati_cool_trial", handle_cool_trial, supports_response="optional"
+    )
+    hass.services.async_register(
+        DOMAIN, "health_check", handle_health_check, supports_response="only"
     )
 
 
