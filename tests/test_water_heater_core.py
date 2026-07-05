@@ -56,7 +56,7 @@ def test_cheap_window_boosts_now_with_min_run_length():
     result = compute_water_heater_mode(make_inputs(future_all_in=future))
     assert result.mode == "cheap_boost"
     assert result.cheap_windows
-    assert all(end - start >= 4 for start, end in result.cheap_windows)
+    assert all(end - start >= 3 for start, end in result.cheap_windows)
     assert result.cheap_windows[0][0] == 0
 
 
@@ -82,7 +82,7 @@ def test_single_cheap_dip_becomes_full_hour_run():
     future = [7.0] + [11.0] * 95
     result = compute_water_heater_mode(make_inputs(future_all_in=future))
     if result.cheap_windows:
-        assert all(end - start >= 4 for start, end in result.cheap_windows)
+        assert all(end - start >= 3 for start, end in result.cheap_windows)
 
 
 def test_expensive_stretch_holds():

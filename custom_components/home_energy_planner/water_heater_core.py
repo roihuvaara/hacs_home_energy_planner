@@ -46,10 +46,14 @@ class WaterHeaterConfig:
     # preserve tank headroom when this much solar is forecast soon
     preserve_upcoming_solar_kwh: float = 6.0
     # schedule grid boosting into the cheapest contiguous windows of the
-    # coming day; min_run_quarters keeps compressor runs long enough
+    # coming day. Measured on the Versati (2026-07-05 run): ~19 min
+    # startup transient with zero tank gain, then ~0.23 C/min, so a
+    # 5 C cheap boost physically takes ~41 min — windows shorter than
+    # that mostly buy the transient. The exact short-run tradeoff is a
+    # per-start cost in the planned MILP formulation, not a rule here.
     price_window_quarters: int = 96  # 24 h
     cheap_quarters: int = 8  # ~2 h boosting budget per day
-    min_run_quarters: int = 4  # never plan runs shorter than 1 h
+    min_run_quarters: int = 3  # 45 min >= measured 41 min 5 C boost run
     cheap_margin_cents: float = 2.0  # window mean this far below the median
     hold_margin_cents: float = 4.0  # current this far above the median
 

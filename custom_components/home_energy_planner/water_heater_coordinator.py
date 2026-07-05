@@ -48,7 +48,7 @@ DEFAULTS = {
 PRESERVE_LOOKAHEAD_HOURS = 6
 # compressor protection: minimum time in a boosting mode, and export
 # hysteresis so surplus flutter around the entry threshold cannot flap
-MIN_CHEAP_BOOST_DWELL = timedelta(minutes=60)
+MIN_CHEAP_BOOST_DWELL = timedelta(minutes=45)
 MIN_SOLAR_BOOST_DWELL = timedelta(minutes=30)
 SOLAR_EXIT_EXPORT_W = 150.0
 
