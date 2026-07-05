@@ -11,7 +11,7 @@ from home_energy_planner.climate_core import (  # noqa: E402
     cold_dip_boost,
     comfort_correction,
     compute_climate_target,
-    price_mode,
+    price_shape,
     sun_correction,
     warm_correction,
     weather_base,
@@ -35,8 +35,6 @@ def make_inputs(**overrides):
         hourly_forecast=hours([5.0] * 24),
         fallback_temp=5.0,
         room_temp=23.5,
-        current_vat=6.0,
-        current_all_in=12.0,
         future_all_in=[12.0] * 96,
         solar_current_hour_kwh=0.0,
         solar_next_hour_kwh=0.0,
@@ -84,32 +82,41 @@ def test_weather_base_coldest_band_plus_bump():
     assert base == 33.0  # coldest band 30 + extreme wind bump 3, under the 35 cap
 
 
-# --- price mode --------------------------------------------------------------
+# --- horizon price shaping ---------------------------------------------------
 
 
-def test_price_mode_very_cheap_vat_is_normal():
-    assert price_mode(3.5, 10.0, [12.0] * 96) == "normal"
+def test_flat_horizon_gets_no_offset():
+    # uniformly cheap or expensive days have nothing worth shifting
+    assert price_shape([2.0] * 48, CONFIG).offset == 0.0
+    assert price_shape([40.0] * 48, CONFIG).offset == 0.0
 
 
-def test_price_mode_boost_band():
-    # vat in (4, 4.5], well below average, expensive slots ahead
-    future = [10.0] + [10.0] * 4 + [20.0] * 8 + [14.0] * 83
-    assert price_mode(4.4, 10.0, future) == "boost"
+def test_cheap_quarter_before_spike_banks_heat():
+    future = [8.0] * 12 + [45.0] * 12 + [15.0] * 24
+    shape = price_shape(future, CONFIG)
+    assert shape.offset >= 2.0
+    assert shape.position < 0
 
 
-def test_price_mode_preheat():
-    future = [11.0] + [11.0] * 4 + [14.0] * 8 + [12.0] * 83
-    assert price_mode(6.0, 11.0, future) == "preheat"
+def test_spike_quarter_coasts():
+    future = [45.0] * 12 + [8.0] * 12 + [15.0] * 24
+    shape = price_shape(future, CONFIG)
+    assert shape.offset == -4.0
 
 
-def test_price_mode_setback():
-    future = [20.0] + [10.0] * 8 + [15.0] * 87
-    assert price_mode(12.0, 20.0, future) == "setback"
+def test_median_price_neutral():
+    future = [15.0] + [8.0] * 20 + [15.0] * 6 + [22.0] * 21
+    assert price_shape(future, CONFIG).offset == 0.0
 
 
-def test_price_mode_defaults_to_normal():
-    assert price_mode(6.0, 12.0, [12.0] * 96) == "normal"
-    assert price_mode(6.0, 12.0, []) == "normal"
+def test_negative_prices_max_boost():
+    future = [-1.0] * 4 + [10.0] * 20 + [20.0] * 24
+    assert price_shape(future, CONFIG).offset == 4.0
+
+
+def test_short_horizon_no_offset():
+    assert price_shape([5.0, 40.0], CONFIG).offset == 0.0
+    assert price_shape([], CONFIG).offset == 0.0
 
 
 # --- corrections -------------------------------------------------------------
@@ -169,19 +176,15 @@ def test_target_combination_and_clamp():
     assert cold.target == 35.0
 
 
-def test_setback_suppressed_when_room_cold():
-    future = [20.0] + [10.0] * 8 + [15.0] * 87
-    warm_room = compute_climate_target(
-        make_inputs(current_vat=12.0, current_all_in=20.0, future_all_in=future, room_temp=23.0)
-    )
-    assert warm_room.price_mode == "setback"
+def test_negative_offset_suppressed_when_room_cold():
+    future = [45.0] * 12 + [8.0] * 12 + [15.0] * 72
+    warm_room = compute_climate_target(make_inputs(future_all_in=future, room_temp=23.0))
+    assert warm_room.price.offset == -4.0
     assert warm_room.protected_price_offset == -4.0
-    cold_room = compute_climate_target(
-        make_inputs(current_vat=12.0, current_all_in=20.0, future_all_in=future, room_temp=22.5)
-    )
+    cold_room = compute_climate_target(make_inputs(future_all_in=future, room_temp=22.5))
     assert cold_room.protected_price_offset == 0.0
     # both rooms sit in the same comfort tier; the only delta is the
-    # suppressed -4 setback offset
+    # suppressed setback offset
     assert cold_room.target == warm_room.target + 4.0
 
 

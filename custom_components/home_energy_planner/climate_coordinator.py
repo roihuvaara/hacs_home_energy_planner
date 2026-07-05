@@ -82,6 +82,7 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         self._pricing = pricing
         self._config = ClimateConfig()
         self._lead_hold_until: datetime | None = None
+        self._last_write: tuple[float, datetime] | None = None
 
     def _option(self, key: str) -> Any:
         return self._entry.options.get(
@@ -189,17 +190,11 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         future_all_in = (
             [p.all_in_cents_per_kwh for p in pricing.periods] if pricing else []
         )
-        current_vat = (
-            pricing.periods[0].vat_cents_per_kwh if pricing and pricing.periods else 0.0
-        )
-        current_all_in = future_all_in[0] if future_all_in else 0.0
 
         inputs = ClimateInputs(
             hourly_forecast=hours,
             fallback_temp=fallback,
             room_temp=self._float_state("room_temp_entity"),
-            current_vat=current_vat,
-            current_all_in=current_all_in,
             future_all_in=future_all_in,
             solar_current_hour_kwh=self._float_state(
                 "solar_energy_current_hour_entity", 0.0
@@ -236,6 +231,22 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             unchanged = False
         if unchanged:
             return {"success": True, "written": False, "target": target}
+        # setpoint dwell: a 1-degree wiggle within half an hour of the last
+        # write is deferred so price-quartile flapping cannot short-cycle
+        # the heat pump; bigger moves (comfort, cold dip, spikes) go through
+        now = dt_util.now()
+        if self._last_write is not None:
+            last_target, last_time = self._last_write
+            if (
+                abs(target - last_target) < 2
+                and now - last_time < timedelta(minutes=30)
+            ):
+                return {
+                    "success": True,
+                    "written": False,
+                    "target": target,
+                    "deferred": True,
+                }
         try:
             await self.hass.services.async_call(
                 "climate",
@@ -246,4 +257,5 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         except Exception as err:  # noqa: BLE001 - report, retry next tick
             _LOGGER.warning("Climate target write failed: %s", err)
             return {"success": False, "written": False, "error": str(err)}
+        self._last_write = (target, now)
         return {"success": True, "written": True, "target": target}

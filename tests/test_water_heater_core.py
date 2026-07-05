@@ -12,74 +12,99 @@ from home_energy_planner.water_heater_core import (  # noqa: E402
 
 def make_inputs(**overrides):
     defaults = dict(
-        current_vat=6.0,
-        current_all_in=12.0,
         future_all_in=[12.0] * 96,
-        solar_now_w=0.0,
-        solar_next_hour_w=0.0,
-        solar_remaining_today_kwh=0.0,
-        battery_soc_pct=50.0,
+        grid_export_w=0.0,
+        upcoming_solar_kwh=0.0,
     )
     defaults.update(overrides)
     return WaterHeaterInputs(**defaults)
 
 
-def test_live_surplus_selects_solar_boost():
-    result = compute_water_heater_mode(make_inputs(solar_now_w=2000.0))
+def test_measured_export_selects_solar_boost():
+    result = compute_water_heater_mode(make_inputs(grid_export_w=800.0))
     assert result.mode == "solar_boost"
     assert result.target_temp == 66
+    below = compute_water_heater_mode(make_inputs(grid_export_w=300.0))
+    assert below.mode != "solar_boost"
 
 
-def test_moderate_surplus_needs_full_battery():
-    partial = compute_water_heater_mode(make_inputs(solar_now_w=1400.0, battery_soc_pct=80.0))
-    assert partial.mode != "solar_boost"
-    full = compute_water_heater_mode(make_inputs(solar_now_w=1400.0, battery_soc_pct=96.0))
-    assert full.mode == "solar_boost"
-
-
-def test_strong_solar_day_preserves_buffer_at_normal():
-    result = compute_water_heater_mode(
-        make_inputs(solar_remaining_today_kwh=20.0, current_vat=3.0)
+def test_upcoming_solar_preserves_headroom_over_cheap_boost():
+    # current quarter is the cheapest of the day, but strong solar is coming:
+    # keep the tank at normal so the surplus has somewhere to go (ADR 0007)
+    future = [5.0] * 4 + [15.0] * 92
+    preserved = compute_water_heater_mode(
+        make_inputs(future_all_in=future, upcoming_solar_kwh=10.0)
     )
-    # would be cheap_boost on vat alone, but the sunny forecast preserves headroom
-    assert result.mode == "normal"
-    assert result.buffer_preserve
-    assert result.target_temp == 55
-
-
-def test_no_preserve_when_price_expensive():
-    result = compute_water_heater_mode(
-        make_inputs(
-            solar_remaining_today_kwh=20.0,
-            current_vat=9.0,
-            current_all_in=20.0,
-            future_all_in=[12.0] * 96,
-        )
+    assert preserved.mode == "normal"
+    assert preserved.buffer_preserve
+    boosted = compute_water_heater_mode(
+        make_inputs(future_all_in=future, upcoming_solar_kwh=1.0)
     )
+    assert boosted.mode == "cheap_boost"
+
+
+def test_surplus_beats_preserve():
+    result = compute_water_heater_mode(
+        make_inputs(grid_export_w=1000.0, upcoming_solar_kwh=10.0)
+    )
+    assert result.mode == "solar_boost"
     assert not result.buffer_preserve
+
+
+def test_cheap_window_boosts_now_with_min_run_length():
+    future = [6.0] * 6 + [14.0] * 90
+    result = compute_water_heater_mode(make_inputs(future_all_in=future))
+    assert result.mode == "cheap_boost"
+    assert result.cheap_windows
+    assert all(end - start >= 4 for start, end in result.cheap_windows)
+    assert result.cheap_windows[0][0] == 0
+
+
+def test_cheap_window_later_does_not_boost_now():
+    future = [14.0] * 20 + [6.0] * 8 + [14.0] * 68
+    result = compute_water_heater_mode(make_inputs(future_all_in=future))
+    assert result.mode == "normal"
+    # the window is planned, just not active yet
+    assert result.cheap_windows and result.cheap_windows[0][0] == 20
+
+
+def test_zigzag_prices_produce_no_boost_windows():
+    # alternating cheap/expensive quarters: no min-run window clears the
+    # margin, so the compressor is never asked to chase 15-minute dips
+    future = [6.0, 14.0] * 48
+    result = compute_water_heater_mode(make_inputs(future_all_in=future))
+    assert result.mode == "normal"
+    assert result.cheap_windows == []
+
+
+def test_single_cheap_dip_becomes_full_hour_run():
+    # one 15-minute dip is worth using only as part of a full-length run
+    future = [7.0] + [11.0] * 95
+    result = compute_water_heater_mode(make_inputs(future_all_in=future))
+    if result.cheap_windows:
+        assert all(end - start >= 4 for start, end in result.cheap_windows)
+
+
+def test_expensive_stretch_holds():
+    future = [30.0] * 8 + [10.0] * 88
+    result = compute_water_heater_mode(make_inputs(future_all_in=future))
     assert result.mode == "hold"
+    assert result.target_temp == 51
 
 
-def test_cheap_boost_branches():
-    # very cheap VAT price alone
-    assert compute_water_heater_mode(make_inputs(current_vat=3.0)).mode == "cheap_boost"
-    # well below horizon average
-    below_avg = make_inputs(current_all_in=10.0, future_all_in=[10.0] + [14.0] * 95)
-    assert compute_water_heater_mode(below_avg).mode == "cheap_boost"
-    # at the horizon minimum
-    at_min = make_inputs(current_all_in=12.0, future_all_in=[12.0] + [12.5] * 40 + [18.0] * 55)
-    assert compute_water_heater_mode(at_min).mode == "cheap_boost"
+def test_flat_prices_run_normal():
+    # spread below the deadband: no boosting, no holding, whatever the level
+    for level in (3.0, 30.0):
+        result = compute_water_heater_mode(make_inputs(future_all_in=[level] * 96))
+        assert result.mode == "normal"
 
 
-def test_normal_and_hold_fallthrough():
-    # current must sit clear of the horizon minimum + 0.75 margin or the
-    # cheap-boost min rule catches it
-    normal = compute_water_heater_mode(
-        make_inputs(current_vat=6.5, current_all_in=14.0, future_all_in=[14.0] * 40 + [12.0] + [14.5] * 55)
-    )
-    assert normal.mode == "normal"
-    hold = compute_water_heater_mode(
-        make_inputs(current_vat=15.0, current_all_in=25.0, future_all_in=[25.0] + [10.0] * 95)
-    )
-    assert hold.mode == "hold"
-    assert hold.target_temp == 51
+def test_negative_price_quarter_boosts():
+    future = [-1.0] * 4 + [8.0] * 44 + [15.0] * 48
+    result = compute_water_heater_mode(make_inputs(future_all_in=future))
+    assert result.mode == "cheap_boost"
+
+
+def test_empty_horizon_runs_normal():
+    result = compute_water_heater_mode(make_inputs(future_all_in=[]))
+    assert result.mode == "normal"

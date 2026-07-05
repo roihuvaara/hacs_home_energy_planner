@@ -195,8 +195,13 @@ class ClimateTargetSensor(CoordinatorEntity[ClimateCoordinator], SensorEntity):
             "mode": data.mode,
             "weather_base": result.weather_base,
             "wind_bump": result.wind_bump,
-            "price_mode": result.price_mode,
-            "price_offset": result.price_offset,
+            "price_offset": result.price.offset,
+            "price_position": result.price.position,
+            "price_now": result.price.current,
+            "price_p10": round(result.price.p10, 3),
+            "price_median": round(result.price.median, 3),
+            "price_p90": round(result.price.p90, 3),
+            "price_spread": round(result.price.spread, 3),
             "protected_price_offset": result.protected_price_offset,
             "cold_dip_boost": result.cold_dip_boost,
             "comfort_correction": result.comfort_correction,
@@ -238,7 +243,7 @@ class WaterHeaterModeSensor(CoordinatorEntity[WaterHeaterCoordinator], SensorEnt
     @property
     def native_value(self) -> str | None:
         data = self.coordinator.data
-        return data.result.mode if data else None
+        return data.effective_mode if data else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -248,13 +253,17 @@ class WaterHeaterModeSensor(CoordinatorEntity[WaterHeaterCoordinator], SensorEnt
         result = data.result
         return {
             "mode": data.mode,
-            "target_temp": result.target_temp,
+            "computed_mode": result.mode,
+            "target_temp": data.effective_target,
             "actual_surplus": result.actual_surplus,
-            "strong_solar_day": result.strong_solar_day,
             "buffer_preserve": result.buffer_preserve,
+            "cheap_windows": result.cheap_windows,
+            "price_median": result.price_median,
+            "price_delta": result.price_delta,
             "legacy_mode": data.legacy_mode,
             "matches_legacy": (
-                data.legacy_mode is not None and result.mode == data.legacy_mode
+                data.legacy_mode is not None
+                and data.effective_mode == data.legacy_mode
             ),
             "last_apply": data.applied,
         }

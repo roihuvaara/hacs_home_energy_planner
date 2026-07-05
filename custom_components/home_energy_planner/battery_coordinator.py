@@ -169,34 +169,9 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
     async def _forecast_solar_wh_by_hour(
         self, now: datetime
     ) -> dict[datetime, float]:
-        try:
-            from homeassistant.components.forecast_solar.energy import (
-                async_get_solar_forecast,
-            )
-        except ImportError:
-            return {}
-        from homeassistant.util import dt as forecast_dt_util
+        from .solar_forecast import async_wh_by_hour
 
-        result: dict[datetime, float] = {}
-        for entry in self.hass.config_entries.async_entries("forecast_solar"):
-            try:
-                forecast = await async_get_solar_forecast(self.hass, entry.entry_id)
-            except Exception as err:  # noqa: BLE001 - fall back to bell curve
-                _LOGGER.debug("forecast_solar data unavailable: %s", err)
-                continue
-            for key, wh in ((forecast or {}).get("wh_hours") or {}).items():
-                ts = (
-                    key
-                    if isinstance(key, datetime)
-                    else forecast_dt_util.parse_datetime(str(key))
-                )
-                if ts is None:
-                    continue
-                hour = ts.astimezone(now.tzinfo).replace(
-                    minute=0, second=0, microsecond=0
-                )
-                result[hour] = result.get(hour, 0.0) + float(wh)
-        return result
+        return await async_wh_by_hour(self.hass, now.tzinfo)
 
     def solar_series_kwh(self, starts: list[datetime], now: datetime) -> list[float]:
         """Distribute daily-total solar forecasts over a daylight bell curve.

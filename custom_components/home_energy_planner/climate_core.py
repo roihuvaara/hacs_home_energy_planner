@@ -1,10 +1,16 @@
-"""Pure climate target computation (ADR 0004/0006 lineage).
+"""Pure climate target computation.
 
-Port of the proxy_climate_* automation pipeline. Constants are the live
-automation values as of 2026-07-05 (which supersede the older ADR
-tables): retuned weather-base bands, always-on warm correction, sun
-correction gated on bright forecast hours, and the falling-temperature
-lead boost. No Home Assistant imports; unit-testable standalone.
+The room-feedback layers (positive-only comfort correction, warm and
+sun corrections, lead boost, cold-dip boost, weather base) carry over
+from the ADR 0004/0006 lineage — they encode household physics: the
+fireplace-biased living-room sensor, no controllable covers, observed
+overshoot. The price layer is rewritten for the integration (ADR 0009):
+instead of the legacy reactive threshold bands with absolute VAT gates,
+the offset comes from where the current price sits in the distribution
+of the coming horizon, with a spread deadband so uniformly cheap or
+expensive days are not price-shaped at all.
+
+No Home Assistant imports; unit-testable standalone.
 """
 
 from __future__ import annotations
@@ -41,10 +47,12 @@ class ClimateConfig:
     windy_hours: int = 6
     very_windy_hours: int = 6
     extreme_hours: int = 4
-    # price mode offsets (c/kWh thresholds are in price_mode())
-    offsets: dict[str, float] = field(
-        default_factory=lambda: {"setback": -4.0, "normal": 0.0, "preheat": 2.0, "boost": 4.0}
-    )
+    # horizon price shaping: offset from the current price's position in
+    # the next `price_window_quarters` distribution, +max when far below
+    # the median, -max when far above; no shaping below the spread deadband
+    price_window_quarters: int = 48  # 12 h
+    price_min_spread_cents: float = 3.0  # p90 - p10 deadband
+    price_max_offset: float = 4.0
     # comfort floor used to suppress negative price offsets
     protect_below_room: float = 22.8
     room_fallback: float = 23.0
@@ -74,8 +82,6 @@ class ClimateInputs:
     hourly_forecast: list[ForecastHour]
     fallback_temp: float
     room_temp: float | None
-    current_vat: float
-    current_all_in: float
     future_all_in: list[float]
     solar_current_hour_kwh: float
     solar_next_hour_kwh: float
@@ -83,12 +89,22 @@ class ClimateInputs:
 
 
 @dataclass(frozen=True)
+class PriceShape:
+    offset: float
+    current: float
+    p10: float
+    median: float
+    p90: float
+    spread: float
+    position: float  # (current - median) / spread; negative = cheap side
+
+
+@dataclass(frozen=True)
 class ClimateResult:
     target: float
     weather_base: float
     wind_bump: float
-    price_mode: str
-    price_offset: float
+    price: PriceShape
     protected_price_offset: float
     cold_dip_boost: float
     comfort_correction: float
@@ -128,42 +144,41 @@ def weather_base(
     return min(config.max_target, base + bump), bump
 
 
-def price_mode(
-    current_vat: float, current_all_in: float, future_all_in: list[float]
-) -> str:
-    """Mode from the VAT price gate plus all-in horizon ranking."""
-    future = future_all_in[:192]
-    if not future:
-        return "normal"
-    average = sum(future) / len(future)
-    ahead_8 = future[1:9]
-    ahead_12 = future[1:13]
-    min_ahead_8 = min(ahead_8) if ahead_8 else current_all_in
-    max_ahead_12 = max(ahead_12) if ahead_12 else current_all_in
-    if current_vat < 4:
-        return "normal"
-    if (
-        current_vat <= 4.5
-        and average > 0
-        and current_all_in <= average * 0.90
-        and max_ahead_12 >= current_all_in + 2.0
-    ):
-        return "boost"
-    if (
-        average > 0
-        and current_vat < 8
-        and current_all_in <= average * 0.95
-        and max_ahead_12 >= current_all_in + 1.0
-    ):
-        return "preheat"
-    if (
-        average > 0
-        and current_vat >= 8
-        and current_all_in >= average * 1.10
-        and min_ahead_8 <= current_all_in - 1.5
-    ):
-        return "setback"
-    return "normal"
+def percentile(sorted_values: list[float], fraction: float) -> float:
+    if not sorted_values:
+        return 0.0
+    index = fraction * (len(sorted_values) - 1)
+    low = int(index)
+    high = min(low + 1, len(sorted_values) - 1)
+    weight = index - low
+    return sorted_values[low] * (1 - weight) + sorted_values[high] * weight
+
+
+def price_shape(future_all_in: list[float], config: ClimateConfig) -> PriceShape:
+    """Offset from the current price's position in the coming distribution.
+
+    Cheap relative to the window -> bank heat into the house mass (+),
+    expensive -> coast on it (-). A narrow p10-p90 spread means there is
+    nothing worth shifting, so the offset stays 0 however cheap or
+    expensive the absolute level is.
+    """
+    window = future_all_in[: config.price_window_quarters]
+    if len(window) < 8:
+        return PriceShape(0.0, window[0] if window else 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    current = window[0]
+    ordered = sorted(window)
+    p10 = percentile(ordered, 0.10)
+    median = percentile(ordered, 0.50)
+    p90 = percentile(ordered, 0.90)
+    spread = p90 - p10
+    if spread < config.price_min_spread_cents:
+        return PriceShape(0.0, current, p10, median, p90, spread, 0.0)
+    position = (current - median) / spread
+    offset = max(
+        -config.price_max_offset,
+        min(config.price_max_offset, -round(position * 2 * config.price_max_offset)),
+    )
+    return PriceShape(float(offset), current, p10, median, p90, spread, round(position, 3))
 
 
 def comfort_correction(room_temp: float | None, config: ClimateConfig) -> float:
@@ -241,8 +256,8 @@ def compute_climate_target(
 ) -> ClimateResult:
     config = config or ClimateConfig()
     base, bump = weather_base(inputs.hourly_forecast, inputs.fallback_temp, config)
-    mode = price_mode(inputs.current_vat, inputs.current_all_in, inputs.future_all_in)
-    offset = config.offsets.get(mode, 0.0)
+    shape = price_shape(inputs.future_all_in, config)
+    offset = shape.offset
     room = inputs.room_temp if inputs.room_temp is not None else config.room_fallback
     protected = 0.0 if room < config.protect_below_room and offset < 0 else offset
     cold_dip = cold_dip_boost(inputs.hourly_forecast, inputs.fallback_temp, config)
@@ -264,8 +279,7 @@ def compute_climate_target(
         target=round(target, 1),
         weather_base=base,
         wind_bump=bump,
-        price_mode=mode,
-        price_offset=offset,
+        price=shape,
         protected_price_offset=protected,
         cold_dip_boost=cold_dip,
         comfort_correction=comfort,
