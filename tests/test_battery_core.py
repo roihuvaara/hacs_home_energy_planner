@@ -104,6 +104,17 @@ def test_compiled_slots_never_overlap_cross_side():
     assert all(s.current == 0 for s in enabled_hold)
 
 
+def test_no_hold_slots_for_empty_battery():
+    # empty buffer + spread too small to charge: the DP labels ties "hold",
+    # which must not become 0 A slots (observed noise: 12:00-22:00 hold at
+    # an empty battery)
+    prices = [10.0] * 24 + [12.0] * 24
+    plan = solve(make_periods(prices), battery(soc=18.0))
+    charge, discharge = compile_slots(plan.periods, battery(soc=18.0))
+    assert not any(s.enabled for s in discharge)
+    assert not any(s.enabled for s in charge)
+
+
 def test_hold_windows_protect_before_expensive():
     prices = [8.0] * 8 + [40.0] * 8
     plan = solve(make_periods(prices), battery(soc=80.0))

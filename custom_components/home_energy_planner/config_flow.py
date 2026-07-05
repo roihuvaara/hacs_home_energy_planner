@@ -80,6 +80,12 @@ def _options_schema(current: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 "battery_mode", default=_default("battery_mode", "observe")
             ): vol.In(["off", "observe", "control"]),
+            vol.Optional(
+                "climate_mode", default=_default("climate_mode", "observe")
+            ): vol.In(["off", "observe", "control"]),
+            vol.Optional(
+                "water_heater_mode", default=_default("water_heater_mode", "observe")
+            ): vol.In(["off", "observe", "control"]),
         }
     )
 

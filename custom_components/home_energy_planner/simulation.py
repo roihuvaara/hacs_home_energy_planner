@@ -85,7 +85,7 @@ async def async_simulate_plan(
         ]
     solar_series = _override_series(data.get("solar"), count, "solar")
     if solar_series is None:
-        solar_series = battery.solar_series_kwh(starts, now)
+        solar_series = await battery.async_solar_series_kwh(starts, now)
 
     params = battery.battery_params(
         {

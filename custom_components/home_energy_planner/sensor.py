@@ -11,8 +11,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .battery_coordinator import BatteryCoordinator
+from .climate_coordinator import ClimateCoordinator
 from .const import DOMAIN
 from .coordinator import PricingCoordinator
+from .water_heater_coordinator import WaterHeaterCoordinator
 
 PRICE_KIND_RAW = "raw"
 PRICE_KIND_VAT = "vat"
@@ -38,6 +40,9 @@ async def async_setup_entry(
             EnergyPriceSensor(coordinator, entry, PRICE_KIND_VAT),
             EnergyPriceSensor(coordinator, entry, PRICE_KIND_ALL_IN),
             BatteryPlanSensor(data["battery"], entry),
+            ClimateTargetSensor(data["climate"], entry),
+            WaterHeaterModeSensor(data["water_heater"], entry),
+            ExportCurtailmentSensor(coordinator, entry),
         ]
     )
 
@@ -152,4 +157,159 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
                 if p.action != "hold" or p.grid_charge_kwh > 0
             ][:64],
             "last_apply_success": (data.applied or {}).get("success"),
+        }
+
+
+class ClimateTargetSensor(CoordinatorEntity[ClimateCoordinator], SensorEntity):
+    """Computed space-heating target; every component in attributes."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Climate target"
+    _attr_native_unit_of_measurement = "°C"
+    _attr_icon = "mdi:home-thermometer"
+
+    def __init__(self, coordinator: ClimateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_climate_target"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": "Home Energy Planner",
+        }
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.data is not None
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data
+        return data.result.target if data else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        if data is None:
+            return {}
+        result = data.result
+        return {
+            "mode": data.mode,
+            "weather_base": result.weather_base,
+            "wind_bump": result.wind_bump,
+            "price_mode": result.price_mode,
+            "price_offset": result.price_offset,
+            "protected_price_offset": result.protected_price_offset,
+            "cold_dip_boost": result.cold_dip_boost,
+            "comfort_correction": result.comfort_correction,
+            "lead_boost": result.lead_boost,
+            "warm_correction": result.warm_correction,
+            "sun_correction": result.sun_correction,
+            "room_temp": data.room_temp,
+            "lead_hold_until": (
+                data.lead_hold_until.isoformat() if data.lead_hold_until else None
+            ),
+            "legacy_target": data.legacy_target,
+            "matches_legacy": (
+                data.legacy_target is not None
+                and abs(result.target - data.legacy_target) < 0.05
+            ),
+            "last_apply": data.applied,
+        }
+
+
+class WaterHeaterModeSensor(CoordinatorEntity[WaterHeaterCoordinator], SensorEntity):
+    """Computed hot-water control mode; tank target in attributes."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Water heater mode"
+    _attr_icon = "mdi:water-boiler"
+
+    def __init__(self, coordinator: WaterHeaterCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_water_heater_mode"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": "Home Energy Planner",
+        }
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.data is not None
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data
+        return data.result.mode if data else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        if data is None:
+            return {}
+        result = data.result
+        return {
+            "mode": data.mode,
+            "target_temp": result.target_temp,
+            "actual_surplus": result.actual_surplus,
+            "strong_solar_day": result.strong_solar_day,
+            "buffer_preserve": result.buffer_preserve,
+            "legacy_mode": data.legacy_mode,
+            "matches_legacy": (
+                data.legacy_mode is not None and result.mode == data.legacy_mode
+            ),
+            "last_apply": data.applied,
+        }
+
+
+class ExportCurtailmentSensor(CoordinatorEntity[PricingCoordinator], SensorEntity):
+    """Export-curtailment intent from raw spot prices (observe only).
+
+    Publishes when the planner would disable grid export (raw spot at or
+    below zero); the control side lands after the export-switch semantics
+    probe (todo 002).
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Export curtailment"
+    _attr_icon = "mdi:transmission-tower-off"
+    _unrecorded_attributes = frozenset({"windows"})
+
+    def __init__(self, coordinator: PricingCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_export_curtailment"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": "Home Energy Planner",
+        }
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data
+        if data is None or not data.periods:
+            return None
+        return "curtail" if data.periods[0].raw_cents_per_kwh <= 0 else "export"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        if data is None:
+            return {}
+        windows = []
+        run_start = None
+        previous = None
+        for period in data.periods:
+            if period.raw_cents_per_kwh <= 0:
+                if run_start is None:
+                    run_start = period.start
+                previous = period.start
+            elif run_start is not None:
+                windows.append({"start": run_start.isoformat(), "end": period.start.isoformat()})
+                run_start = None
+        if run_start is not None and previous is not None:
+            windows.append({"start": run_start.isoformat(), "end": None})
+        return {
+            "raw_now": data.periods[0].raw_cents_per_kwh if data.periods else None,
+            "windows": windows,
+            "curtailed_period_count": sum(
+                1 for p in data.periods if p.raw_cents_per_kwh <= 0
+            ),
         }

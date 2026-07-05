@@ -17,15 +17,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.async_schedule_quarter_ticks()
 
     from .battery_coordinator import MODE_OFF, BatteryCoordinator
+    from .climate_coordinator import ClimateCoordinator
+    from .water_heater_coordinator import WaterHeaterCoordinator
 
     battery = BatteryCoordinator(hass, entry, coordinator)
     if battery.mode != MODE_OFF:
         await battery.async_refresh()
         battery.async_schedule_ticks()
 
+    climate = ClimateCoordinator(hass, entry, coordinator)
+    if climate.mode != MODE_OFF:
+        await climate.async_refresh()
+        climate.async_schedule_ticks()
+
+    water_heater = WaterHeaterCoordinator(hass, entry, coordinator)
+    if water_heater.mode != MODE_OFF:
+        await water_heater.async_refresh()
+        water_heater.async_schedule_ticks()
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "pricing": coordinator,
         "battery": battery,
+        "climate": climate,
+        "water_heater": water_heater,
     }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))

@@ -147,11 +147,61 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             for bucket in sums
         }
 
+    async def async_solar_series_kwh(
+        self, starts: list[datetime], now: datetime
+    ) -> list[float]:
+        """Per-period solar kWh from Forecast.Solar's hourly Wh series.
+
+        Falls back to the daylight bell curve when the forecast_solar
+        integration or its energy-platform data is unavailable.
+        """
+        wh_by_hour = await self._forecast_solar_wh_by_hour(now)
+        if not wh_by_hour:
+            return self.solar_series_kwh(starts, now)
+        series = []
+        for ts in starts:
+            hour = ts.astimezone(now.tzinfo).replace(
+                minute=0, second=0, microsecond=0
+            )
+            series.append(round(wh_by_hour.get(hour, 0.0) / 4000.0, 4))
+        return series
+
+    async def _forecast_solar_wh_by_hour(
+        self, now: datetime
+    ) -> dict[datetime, float]:
+        try:
+            from homeassistant.components.forecast_solar.energy import (
+                async_get_solar_forecast,
+            )
+        except ImportError:
+            return {}
+        from homeassistant.util import dt as forecast_dt_util
+
+        result: dict[datetime, float] = {}
+        for entry in self.hass.config_entries.async_entries("forecast_solar"):
+            try:
+                forecast = await async_get_solar_forecast(self.hass, entry.entry_id)
+            except Exception as err:  # noqa: BLE001 - fall back to bell curve
+                _LOGGER.debug("forecast_solar data unavailable: %s", err)
+                continue
+            for key, wh in ((forecast or {}).get("wh_hours") or {}).items():
+                ts = (
+                    key
+                    if isinstance(key, datetime)
+                    else forecast_dt_util.parse_datetime(str(key))
+                )
+                if ts is None:
+                    continue
+                hour = ts.astimezone(now.tzinfo).replace(
+                    minute=0, second=0, microsecond=0
+                )
+                result[hour] = result.get(hour, 0.0) + float(wh)
+        return result
+
     def solar_series_kwh(self, starts: list[datetime], now: datetime) -> list[float]:
         """Distribute daily-total solar forecasts over a daylight bell curve.
 
-        Baseline quality on purpose (ADR 0009: baseline to beat); a proper
-        per-period provider series replaces this later.
+        Fallback path behind ``async_solar_series_kwh``.
         """
         today_remaining = self._float_state("solar_today_entity")
         tomorrow_total = self._float_state("solar_tomorrow_entity")
@@ -207,7 +257,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         now = dt_util.now()
         starts = [p.start for p in pricing.periods]
         load_by_quarter = await self.load_baseline_kwh_by_quarter(now)
-        solar = self.solar_series_kwh(starts, now)
+        solar = await self.async_solar_series_kwh(starts, now)
 
         periods = []
         for index, price_period in enumerate(pricing.periods):

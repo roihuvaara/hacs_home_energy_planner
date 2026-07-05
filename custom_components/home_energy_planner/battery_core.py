@@ -22,6 +22,9 @@ ROUND_TRIP_EFFICIENCY = 0.9
 CHARGE_EFF = ROUND_TRIP_EFFICIENCY**0.5
 DISCHARGE_EFF = ROUND_TRIP_EFFICIENCY**0.5
 CYCLE_COST_CENTS_PER_KWH = 4.0
+# Hold windows protect stored energy; below this buffer there is nothing
+# to protect and the DP labels ties "hold", producing noise slots.
+MIN_HOLD_BUFFER_KWH = 0.25
 
 Action = Literal["charge", "hold", "self_use"]
 
@@ -277,6 +280,11 @@ def compile_slots(
     candidates: list[tuple[float, str, SlotSpec]] = []
     for action in ("charge", "hold"):
         for window in _windows(plans, action):  # type: ignore[arg-type]
+            if action == "hold" and (
+                max(max(p.buffer_start_kwh, p.buffer_end_kwh) for p in window)
+                < MIN_HOLD_BUFFER_KWH
+            ):
+                continue
             candidates.append(
                 (
                     _window_value(window, action),  # type: ignore[arg-type]
