@@ -80,7 +80,7 @@ async def async_simulate_plan(
     count = len(starts)
     load_series = _override_series(data.get("load"), count, "load")
     if load_series is None:
-        baseline = await battery.load_baseline_kwh_by_quarter(now)
+        baseline, _info = await battery.async_load_forecast_kwh_by_quarter(now)
         load_series = [
             baseline.get(_quarter_bucket(ts, now.tzinfo), 0.15) for ts in starts
         ]

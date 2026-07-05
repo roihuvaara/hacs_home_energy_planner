@@ -24,8 +24,9 @@ from typing import Any
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
-from .battery_core import PERIOD_MINUTES, Period, solve
+from .battery_core import PERIOD_MINUTES, Period
 from .battery_coordinator import BatteryCoordinator
+from .milp_core import solve_best
 from .coordinator import PricingCoordinator
 from .pricing import build_price_horizon
 
@@ -185,7 +186,9 @@ async def async_backtest(
         ]
 
         params = battery.battery_params({"soc_pct": soc})
-        plan = await hass.async_add_executor_job(solve, periods, params)
+        plan, engine = await hass.async_add_executor_job(
+            solve_best, periods, params, str(data.get("engine", "lp"))
+        )
 
         actual_cents: float | None = None
         if grid_entity:
@@ -229,6 +232,7 @@ async def async_backtest(
     savings = totals["baseline_cents"] - totals["planned_cents"]
     return {
         "config": {
+            "engine": str(data.get("engine", "lp")),
             "days_requested": days,
             "load_entity": load_entity,
             "solar_entity": solar_entity,

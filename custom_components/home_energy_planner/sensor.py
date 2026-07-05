@@ -14,6 +14,7 @@ from .battery_coordinator import BatteryCoordinator
 from .climate_coordinator import ClimateCoordinator
 from .const import DOMAIN
 from .coordinator import PricingCoordinator
+from .ilp_coordinator import IlpCoordinator
 from .water_heater_coordinator import WaterHeaterCoordinator
 
 PRICE_KIND_RAW = "raw"
@@ -42,6 +43,7 @@ async def async_setup_entry(
             BatteryPlanSensor(data["battery"], entry),
             ClimateTargetSensor(data["climate"], entry),
             WaterHeaterModeSensor(data["water_heater"], entry),
+            IlpRecommendationSensor(data["ilp"], entry),
             ExportCurtailmentSensor(coordinator, entry),
         ]
     )
@@ -138,6 +140,8 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
         return {
             "mode": data.mode,
             "engine": data.engine,
+            "load_forecast": data.load_info,
+            "tank_milp_windows": data.tank_windows,
             "planned_cost_cents": plan.total_cost_cents,
             "baseline_cost_cents": plan.baseline_cost_cents,
             "planned_saving_cents": round(
@@ -322,4 +326,46 @@ class ExportCurtailmentSensor(CoordinatorEntity[PricingCoordinator], SensorEntit
             "curtailed_period_count": sum(
                 1 for p in data.periods if p.raw_cents_per_kwh <= 0
             ),
+        }
+
+
+class IlpRecommendationSensor(CoordinatorEntity[IlpCoordinator], SensorEntity):
+    """Recommended ILP (air-to-air) action; reasons in attributes."""
+
+    _attr_has_entity_name = True
+    _attr_name = "ILP recommendation"
+    _attr_icon = "mdi:heat-pump"
+
+    def __init__(self, coordinator: IlpCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_ilp_recommendation"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": "Home Energy Planner",
+        }
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.data is not None
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data
+        return data.effective_action if data else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        if data is None:
+            return {}
+        result = data.result
+        return {
+            "mode": data.mode,
+            "computed_action": result.action,
+            "reason": result.reason,
+            "target_temp": result.target_temp,
+            "room_temp": data.room_temp,
+            "actual_surplus": result.actual_surplus,
+            "price_delta": result.price_delta,
+            "last_apply": data.applied,
         }

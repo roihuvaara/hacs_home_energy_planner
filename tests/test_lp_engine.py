@@ -128,3 +128,60 @@ def test_lp_negative_prices_charge_full_rate():
     negative = [p for p in plan.periods if p.price_cents_per_kwh < 0]
     assert all(p.grid_charge_kwh > 0 for p in negative)
     assert sum(p.discharge_to_load_kwh for p in negative) == 0
+
+
+def test_joint_solve_schedules_tank_into_cheap_contiguous_runs():
+    from home_energy_planner.milp_core import TankParams, solve_joint
+
+    prices = [5.0] * 6 + [50.0] * 4 + [12.0] * 7 + [45.0] * 4 + [8.0] * 3
+    periods = day(prices, [0.8] * 24)
+    params = battery()
+    tank = TankParams()
+    plan, windows = solve_joint(periods, params, tank)
+
+    assert windows, "tank must be scheduled"
+    # min-run respected and runs contiguous by construction
+    assert all(end - start >= tank.min_run_quarters for start, end in windows)
+    # energy need met over the horizon
+    scheduled_kwh = sum(end - start for start, end in windows) * tank.power_kw * 0.25
+    assert scheduled_kwh >= tank.daily_need_kwh - 1e-6
+    # tank hours are drawn from the cheap end of the day
+    tank_prices = [
+        periods[t].price_cents_per_kwh
+        for start, end in windows
+        for t in range(start, end)
+    ]
+    assert max(tank_prices) <= 12.0, tank_prices
+    # battery still arbitrages: the joint battery plan stays consistent
+    assert plan.total_cost_cents < plan.baseline_cost_cents
+
+
+def test_joint_per_start_cost_prefers_fewer_runs():
+    from home_energy_planner.milp_core import TankParams, solve_joint
+
+    # two equally cheap windows far apart: with a big per-start cost the
+    # solver should consolidate into a single longer run
+    prices = [5.0] * 4 + [20.0] * 8 + [5.0] * 4 + [20.0] * 8
+    periods = day(prices, [0.4] * 24)
+    cheap_start = TankParams(per_start_kwh=0.0, daily_need_kwh=6.0)
+    pricey_start = TankParams(per_start_kwh=3.0, daily_need_kwh=6.0)
+    _, windows_free = solve_joint(periods, battery(), cheap_start)
+    _, windows_costly = solve_joint(periods, battery(), pricey_start)
+    assert len(windows_costly) <= len(windows_free)
+
+
+def test_joint_fuse_cap_limits_simultaneous_load():
+    from home_energy_planner.milp_core import TankParams, solve_joint
+
+    # tiny fuse: tank (3.3 kW) + house (1.6 kW) leaves no room for battery
+    # charging during tank runs
+    prices = [5.0] * 8 + [40.0] * 16
+    periods = day(prices, [1.6] * 24)
+    tank = TankParams(fuse_kw=5.0)
+    plan, windows = solve_joint(periods, battery(), tank)
+    on_quarters = {t for start, end in windows for t in range(start, end)}
+    for t in on_quarters:
+        assert plan.periods[t].grid_charge_kwh <= 0.02, (
+            t,
+            plan.periods[t].grid_charge_kwh,
+        )

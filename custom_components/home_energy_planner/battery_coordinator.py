@@ -48,7 +48,17 @@ DEFAULTS = {
     "battery_capacity_kwh": 5.12,
     "battery_soh_pct": 97.0,
     "battery_engine": "lp",
+    # daily-energy temperature model fitted 2026-07-06 on 182 days of
+    # statistics vs Open-Meteo (R2 0.62 on heating days): expected
+    # kWh/day = max(warm_floor, base + slope * T_out)
+    "outdoor_temp_entity": "sensor.ilp_ulkolampotila",
+    "weather_entity": "weather.forecast_koti",
+    "load_temp_base_kwh": 81.9,
+    "load_temp_slope_kwh_per_c": -2.80,
+    "load_temp_warm_floor_kwh": 58.5,
 }
+LOAD_SCALE_MIN = 0.7
+LOAD_SCALE_MAX = 1.4
 
 
 class BatteryPlanData:
@@ -59,6 +69,8 @@ class BatteryPlanData:
         discharge_slots: list[SlotSpec],
         mode: str,
         engine: str,
+        load_info: dict[str, Any],
+        tank_windows: list[dict[str, Any]] | None,
         applied: dict[str, Any] | None,
     ) -> None:
         self.plan = plan
@@ -66,6 +78,8 @@ class BatteryPlanData:
         self.discharge_slots = discharge_slots
         self.mode = mode
         self.engine = engine
+        self.load_info = load_info
+        self.tank_windows = tank_windows
         self.applied = applied
 
 
@@ -148,6 +162,80 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             bucket: (sums[bucket] / counts[bucket]) / 1000.0 * (PERIOD_MINUTES / 60.0)
             for bucket in sums
         }
+
+    def _expected_daily_kwh(self, temp_c: float) -> float:
+        return max(
+            float(self._option("load_temp_warm_floor_kwh")),
+            float(self._option("load_temp_base_kwh"))
+            + float(self._option("load_temp_slope_kwh_per_c")) * temp_c,
+        )
+
+    async def _mean_outdoor_temp_7d(self, now: datetime) -> float | None:
+        from homeassistant.components.recorder.statistics import (
+            statistics_during_period,
+        )
+
+        entity_id = str(self._option("outdoor_temp_entity"))
+        rows = (
+            await self.hass.async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                now - timedelta(days=7),
+                now,
+                {entity_id},
+                "day",
+                None,
+                {"mean"},
+            )
+        ).get(entity_id, [])
+        means = [row["mean"] for row in rows if row.get("mean") is not None]
+        return sum(means) / len(means) if means else None
+
+    async def _forecast_mean_temp_24h(self) -> float | None:
+        weather_entity = str(self._option("weather_entity"))
+        try:
+            response = await self.hass.services.async_call(
+                "weather",
+                "get_forecasts",
+                {"entity_id": weather_entity, "type": "hourly"},
+                blocking=True,
+                return_response=True,
+            )
+        except Exception as err:  # noqa: BLE001 - scaling degrades to 1.0
+            _LOGGER.debug("Weather forecast unavailable for load scaling: %s", err)
+            return None
+        rows = []
+        if isinstance(response, dict):
+            rows = (response.get(weather_entity) or {}).get("forecast") or []
+        temps = []
+        for row in rows[:24]:
+            try:
+                temps.append(float(row["temperature"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return sum(temps) / len(temps) if temps else None
+
+    async def async_load_forecast_kwh_by_quarter(
+        self, now: datetime
+    ) -> tuple[dict[int, float], dict[str, Any]]:
+        """7-day bucket baseline scaled by the temperature model."""
+        buckets = await self.load_baseline_kwh_by_quarter(now)
+        t_recent = await self._mean_outdoor_temp_7d(now)
+        t_forecast = await self._forecast_mean_temp_24h()
+        scale = 1.0
+        if t_recent is not None and t_forecast is not None:
+            reference = self._expected_daily_kwh(t_recent)
+            if reference > 0:
+                scale = max(
+                    LOAD_SCALE_MIN,
+                    min(LOAD_SCALE_MAX, self._expected_daily_kwh(t_forecast) / reference),
+                )
+        info = {
+            "scale": round(scale, 3),
+            "outdoor_mean_7d": round(t_recent, 1) if t_recent is not None else None,
+            "forecast_mean_24h": round(t_forecast, 1) if t_forecast is not None else None,
+        }
+        return {bucket: kwh * scale for bucket, kwh in buckets.items()}, info
 
     async def async_solar_series_kwh(
         self, starts: list[datetime], now: datetime
@@ -233,7 +321,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
 
         now = dt_util.now()
         starts = [p.start for p in pricing.periods]
-        load_by_quarter = await self.load_baseline_kwh_by_quarter(now)
+        load_by_quarter, load_info = await self.async_load_forecast_kwh_by_quarter(now)
         solar = await self.async_solar_series_kwh(starts, now)
 
         periods = []
@@ -258,6 +346,28 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         )
         charge_slots, discharge_slots = compile_slots(plan.periods, battery)
 
+        # joint battery+tank MILP runs as an observe artifact alongside the
+        # rule-based water heater module; its windows publish for the gate
+        tank_windows: list[dict[str, Any]] | None = None
+        if engine == "lp":
+            try:
+                from .milp_core import TankParams, solve_joint
+
+                _joint_plan, windows = await self.hass.async_add_executor_job(
+                    solve_joint, periods, battery, TankParams()
+                )
+                tank_windows = [
+                    {
+                        "start": periods[start].start.isoformat(),
+                        "end": (
+                            periods[end - 1].start + timedelta(minutes=PERIOD_MINUTES)
+                        ).isoformat(),
+                    }
+                    for start, end in windows
+                ]
+            except Exception as err:  # noqa: BLE001 - observe artifact only
+                _LOGGER.debug("Joint tank solve unavailable: %s", err)
+
         applied: dict[str, Any] | None = None
         if mode == MODE_CONTROL:
             applied = await apply_slots(
@@ -269,5 +379,12 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
                 _LOGGER.warning("Battery plan apply failed: %s", applied)
 
         return BatteryPlanData(
-            plan, charge_slots, discharge_slots, mode, engine, applied
+            plan,
+            charge_slots,
+            discharge_slots,
+            mode,
+            engine,
+            load_info,
+            tank_windows,
+            applied,
         )
