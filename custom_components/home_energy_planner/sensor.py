@@ -244,6 +244,7 @@ class ClimateTargetSensor(CoordinatorEntity[ClimateCoordinator], SensorEntity):
                 else None
             ),
             "manual_override_count": self.coordinator._override.count,
+            "cooling": data.cooling,
             "legacy_target": data.legacy_target,
             "matches_legacy": (
                 data.legacy_target is not None

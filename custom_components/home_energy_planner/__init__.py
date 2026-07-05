@@ -120,7 +120,19 @@ def _async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(
         DOMAIN, "backtest", handle_backtest, supports_response="only"
     )
+    async def handle_cool_trial(call: ServiceCall) -> ServiceResponse:
+        for bundle in hass.data.get(DOMAIN, {}).values():
+            if isinstance(bundle, dict) and "climate" in bundle:
+                return await bundle["climate"].async_start_cool_trial(
+                    int(call.data.get("minutes", 60)),
+                    call.data.get("water_temp"),
+                )
+        raise HomeAssistantError("home_energy_planner is not set up")
+
     hass.services.async_register(DOMAIN, "set_mode", handle_set_mode)
+    hass.services.async_register(
+        DOMAIN, "versati_cool_trial", handle_cool_trial, supports_response="optional"
+    )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -184,3 +184,31 @@ set_mode:
       selector:
         select:
           options: ["off", "observe", "control"]
+
+versati_cool_trial:
+  name: Versati hydronic cooling trial
+  description: >-
+    Bounded trial of slab cooling: switches the Versati to cool mode at a
+    dew-point-guarded water target, auto-reverts to heat after the given
+    duration, and sends start/finish notifications. Watch the pannuhuone
+    manifold and exposed pipes for condensation during the run.
+  fields:
+    minutes:
+      name: Duration
+      description: Trial length before auto-revert (10-240 minutes).
+      required: false
+      default: 60
+      selector:
+        number:
+          min: 10
+          max: 240
+          unit_of_measurement: min
+    water_temp:
+      name: Water target
+      description: Chilled-water target C; the room dew point + 2 C floor always applies.
+      required: false
+      selector:
+        number:
+          min: 14
+          max: 25
+          step: 0.5

@@ -75,6 +75,16 @@ class ClimateConfig:
     # lead boost: falling room temperature below the comfort floor
     lead_room_below: float = 23.1
     lead_hold_minutes: int = 90
+    # hydronic (slab) cooling: conservative chilled-water targets, always
+    # floored by room dew point + margin so the floor surface and the
+    # exposed pannuhuone piping stay dry
+    cool_water_target: float = 18.0
+    cool_water_target_hot: float = 16.0  # allowed on genuinely hot days
+    cool_hot_day_outdoor: float = 27.0
+    dew_point_margin: float = 2.0
+    cool_room_above: float = 24.5  # switch to cooling when room is warm
+    cool_room_stop: float = 23.5  # back to heating mode below this
+    test_day_outdoor_max: float = 25.0  # notify: good day to trial cooling
 
 
 @dataclass(frozen=True)
@@ -249,6 +259,41 @@ def lead_boost(
     if room_temp is None or not hold_active:
         return 0.0
     return 1.0 if room_temp < config.lead_room_below else 0.0
+
+
+def dew_point_c(temp_c: float, rh_pct: float) -> float:
+    """Magnus approximation; the condensation limit for chilled surfaces."""
+    import math
+
+    gamma = math.log(max(1.0, min(100.0, rh_pct)) / 100.0) + (
+        17.62 * temp_c / (243.12 + temp_c)
+    )
+    return 243.12 * gamma / (17.62 - gamma)
+
+
+def cool_water_target(
+    room_temp: float | None,
+    room_humidity: float | None,
+    outdoor_forecast_max: float | None,
+    config: ClimateConfig | None = None,
+) -> tuple[float, float | None]:
+    """Chilled-water target and the dew point it was floored against.
+
+    Hot days may use the lower target, but the dew-point floor always
+    wins: drier air permits colder water, humid air forbids it.
+    """
+    config = config or ClimateConfig()
+    target = (
+        config.cool_water_target_hot
+        if outdoor_forecast_max is not None
+        and outdoor_forecast_max >= config.cool_hot_day_outdoor
+        else config.cool_water_target
+    )
+    dew = None
+    if room_temp is not None and room_humidity is not None:
+        dew = round(dew_point_c(room_temp, room_humidity), 1)
+        target = max(target, dew + config.dew_point_margin)
+    return round(target, 1), dew
 
 
 def compute_climate_target(

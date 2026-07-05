@@ -195,3 +195,29 @@ def test_lead_boost_requires_hold_and_cold_room():
     assert idle.lead_boost == 0.0
     warm_held = compute_climate_target(make_inputs(room_temp=23.5, lead_hold_active=True))
     assert warm_held.lead_boost == 0.0
+
+
+def test_dew_point_sanity():
+    from home_energy_planner.climate_core import dew_point_c
+
+    assert abs(dew_point_c(23.0, 50.0) - 12.0) < 0.5
+    assert abs(dew_point_c(25.0, 60.0) - 16.7) < 0.6
+    assert dew_point_c(23.0, 100.0) == 23.0 or abs(dew_point_c(23.0, 100.0) - 23.0) < 0.01
+
+
+def test_cool_water_target_guarded():
+    from home_energy_planner.climate_core import cool_water_target
+
+    # normal day, dry room: conservative 18
+    target, dew = cool_water_target(23.0, 50.0, 22.0, CONFIG)
+    assert target == 18.0 and dew is not None
+    # hot day, dry room: allowed down to 16
+    target, _ = cool_water_target(23.0, 50.0, 28.0, CONFIG)
+    assert target == 16.0
+    # hot day, humid room: dew point floor wins over the hot-day target
+    target, dew = cool_water_target(25.0, 70.0, 28.0, CONFIG)
+    assert dew is not None and target == round(dew + CONFIG.dew_point_margin, 1)
+    assert target > 16.0
+    # unknown humidity: fall back to the configured target only
+    target, dew = cool_water_target(23.0, None, 28.0, CONFIG)
+    assert target == 16.0 and dew is None

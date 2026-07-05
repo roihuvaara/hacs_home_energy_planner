@@ -45,10 +45,14 @@ MODE_CONTROL = "control"
 DEFAULTS = {
     "weather_entity": "weather.forecast_koti",
     "room_temp_entity": "sensor.olohuone_climate_lampotila",
+    "room_humidity_entity": "sensor.olohuone_climate_kosteus",
     "climate_entity": "climate.gree_versati_space_heating_2",
     "solar_energy_current_hour_entity": "sensor.energy_current_hour",
     "solar_energy_next_hour_entity": "sensor.energy_next_hour",
     "legacy_climate_target_entity": "input_number.climate_target_temp",
+    # hydronic cooling rollout: off | notify (announce good trial days) |
+    # control (planner drives cool mode with the dew-point guard)
+    "versati_cooling": "notify",
 }
 
 
@@ -60,6 +64,7 @@ class ClimateData:
         room_temp: float | None,
         lead_hold_until: datetime | None,
         legacy_target: float | None,
+        cooling: dict[str, Any],
         applied: dict[str, Any] | None,
     ) -> None:
         self.result = result
@@ -67,6 +72,7 @@ class ClimateData:
         self.room_temp = room_temp
         self.lead_hold_until = lead_hold_until
         self.legacy_target = legacy_target
+        self.cooling = cooling
         self.applied = applied
 
 
@@ -83,6 +89,8 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         self._config = ClimateConfig()
         self._lead_hold_until: datetime | None = None
         self._last_write: tuple[float, datetime] | None = None
+        self._trial_until: datetime | None = None
+        self._last_test_notify = None
         from .manual_override import ManualOverrideTracker
 
         self._override = ManualOverrideTracker()
@@ -189,6 +197,75 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             )
         return hours, fallback
 
+    async def _async_notify(self, title: str, message: str) -> None:
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {"title": title, "message": message, "notification_id": f"{DOMAIN}_cooling"},
+            blocking=False,
+        )
+        try:
+            await self.hass.services.async_call(
+                "notify", "notify", {"title": title, "message": message}, blocking=False
+            )
+        except Exception as err:  # noqa: BLE001 - persistent notification stands
+            _LOGGER.debug("Mobile notify unavailable: %s", err)
+
+    async def async_start_cool_trial(
+        self, minutes: int, water_temp: float | None
+    ) -> dict[str, Any]:
+        """Bounded hydronic cooling trial: cool mode now, auto-revert later."""
+        from homeassistant.helpers.event import async_call_later
+
+        from .climate_core import cool_water_target
+
+        minutes = max(10, min(240, minutes))
+        room = self._float_state("room_temp_entity")
+        humidity = self._float_state("room_humidity_entity")
+        target, dew = cool_water_target(room, humidity, None, self._config)
+        if water_temp is not None:
+            target = max(float(water_temp), (dew + self._config.dew_point_margin) if dew is not None else float(water_temp))
+        climate_entity = str(self._option("climate_entity"))
+        await self.hass.services.async_call(
+            "climate",
+            "set_hvac_mode",
+            {"entity_id": climate_entity, "hvac_mode": "cool"},
+            blocking=True,
+        )
+        await self.hass.services.async_call(
+            "climate",
+            "set_temperature",
+            {"entity_id": climate_entity, "temperature": target},
+            blocking=True,
+        )
+        self._trial_until = dt_util.now() + timedelta(minutes=minutes)
+
+        async def _revert(_now: Any) -> None:
+            self._trial_until = None
+            await self.hass.services.async_call(
+                "climate",
+                "set_hvac_mode",
+                {"entity_id": climate_entity, "hvac_mode": "heat"},
+                blocking=True,
+            )
+            await self._async_notify(
+                "Hydronic cooling trial finished",
+                "Reverted to heat mode. Check the pannuhuone manifold and exposed pipes for condensation before trusting cool mode.",
+            )
+            await self.async_request_refresh()
+
+        async_call_later(self.hass, timedelta(minutes=minutes), _revert)
+        await self._async_notify(
+            "Hydronic cooling trial started",
+            f"Cool mode at {target} C water for {minutes} min (room dew point {dew} C). Watch the manifold for sweating.",
+        )
+        return {
+            "success": True,
+            "water_target": target,
+            "dew_point": dew,
+            "revert_at": self._trial_until.isoformat(),
+        }
+
     async def _async_update_data(self) -> ClimateData:
         mode = self.mode
         if mode == MODE_OFF:
@@ -221,9 +298,50 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         )
         result = compute_climate_target(inputs, self._config)
 
+        # hydronic cooling: dew-point-guarded chilled-water target and
+        # test-day detection (notify mode announces good trial days)
+        from .climate_core import cool_water_target
+
+        humidity = self._float_state("room_humidity_entity")
+        forecast_max = max((h.temperature for h in hours), default=None)
+        water_target, dew = cool_water_target(
+            inputs.room_temp, humidity, forecast_max, self._config
+        )
+        suitable_test_day = (
+            forecast_max is not None
+            and forecast_max >= self._config.test_day_outdoor_max
+        )
+        cooling_mode = str(self._option("versati_cooling"))
+        cooling = {
+            "rollout": cooling_mode,
+            "forecast_max_24h": forecast_max,
+            "water_target": water_target,
+            "dew_point": dew,
+            "suitable_test_day": suitable_test_day,
+            "trial_until": self._trial_until.isoformat() if self._trial_until else None,
+        }
+        if (
+            cooling_mode == "notify"
+            and suitable_test_day
+            and 7 <= now.hour < 12
+            and self._last_test_notify != now.date()
+        ):
+            self._last_test_notify = now.date()
+            await self._async_notify(
+                "Good day to trial hydronic cooling",
+                f"Forecast max {forecast_max:.0f} C. Run home_energy_planner.versati_cool_trial "
+                f"(water target {water_target} C, room dew point {dew} C) and check the "
+                "pannuhuone manifold for condensation during the run.",
+            )
+
         applied: dict[str, Any] | None = None
-        if mode == MODE_CONTROL:
-            applied = await self._async_apply(result.target)
+        if mode == MODE_CONTROL and self._trial_until is None:
+            if cooling_mode == "control":
+                applied = await self._async_apply_with_cooling(
+                    result.target, water_target, inputs.room_temp
+                )
+            else:
+                applied = await self._async_apply(result.target)
 
         return ClimateData(
             result=result,
@@ -231,8 +349,42 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             room_temp=inputs.room_temp,
             lead_hold_until=self._lead_hold_until,
             legacy_target=self._float_state("legacy_climate_target_entity"),
+            cooling=cooling,
             applied=applied,
         )
+
+    async def _async_apply_with_cooling(
+        self, heat_target: float, water_target: float, room: float | None
+    ) -> dict[str, Any]:
+        """Drive heat/cool mode by the room band, dew-point guard on water."""
+        climate_entity = str(self._option("climate_entity"))
+        state = self.hass.states.get(climate_entity)
+        hvac = state.state if state else None
+        if room is not None and room >= self._config.cool_room_above and hvac != "cool":
+            await self.hass.services.async_call(
+                "climate",
+                "set_hvac_mode",
+                {"entity_id": climate_entity, "hvac_mode": "cool"},
+                blocking=True,
+            )
+            hvac = "cool"
+        elif hvac == "cool" and (room is None or room <= self._config.cool_room_stop):
+            await self.hass.services.async_call(
+                "climate",
+                "set_hvac_mode",
+                {"entity_id": climate_entity, "hvac_mode": "heat"},
+                blocking=True,
+            )
+            hvac = "heat"
+        if hvac == "cool":
+            await self.hass.services.async_call(
+                "climate",
+                "set_temperature",
+                {"entity_id": climate_entity, "temperature": water_target},
+                blocking=True,
+            )
+            return {"success": True, "hvac": "cool", "water_target": water_target}
+        return await self._async_apply(heat_target)
 
     async def _async_apply(self, target: float) -> dict[str, Any]:
         climate_entity = str(self._option("climate_entity"))
