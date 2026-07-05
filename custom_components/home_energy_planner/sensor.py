@@ -398,6 +398,7 @@ class IlpRecommendationSensor(CoordinatorEntity[IlpCoordinator], SensorEntity):
             "reason": result.reason,
             "target_temp": result.target_temp,
             "room_temp": data.room_temp,
+            "room_humidity": data.room_humidity,
             "actual_surplus": result.actual_surplus,
             "price_delta": result.price_delta,
             "manual_override_until": (

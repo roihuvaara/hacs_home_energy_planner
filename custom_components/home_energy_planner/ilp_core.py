@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 ACTION_COOL = "cool"
+ACTION_DRY = "dry"
 ACTION_OFF = "off"
 
 
@@ -32,15 +33,22 @@ class IlpConfig:
     surplus_export_w: float = 500.0
     hot_day_outdoor_max: float = 25.0  # forecast max that marks a hot day
     price_window_quarters: int = 96
+    # humidity comfort (living-room Aqara): cooling already dehumidifies,
+    # so dry only runs when temperature does not call for cooling
+    dry_humidity_above: float = 62.0  # dry when humid AND energy cheap/free
+    dry_humidity_hard: float = 70.0  # dry at any price above this
+    dry_humidity_stop: float = 55.0  # keep drying until back here
 
 
 @dataclass(frozen=True)
 class IlpInputs:
     room_temp: float | None
+    room_humidity: float | None
     grid_export_w: float
     future_all_in: list[float]
     outdoor_forecast_max_24h: float | None
     currently_cooling: bool
+    currently_drying: bool
 
 
 @dataclass(frozen=True)
@@ -78,6 +86,7 @@ def compute_ilp_action(
     )
 
     room = inputs.room_temp
+    humidity = inputs.room_humidity
     action = ACTION_OFF
     reason = "room unknown" if room is None else "comfortable"
     if room is not None:
@@ -92,6 +101,17 @@ def compute_ilp_action(
             action, reason = ACTION_COOL, "pre-cool for hot day on surplus"
         elif inputs.currently_cooling and room > config.cool_room_stop:
             action, reason = ACTION_COOL, "finishing cooling run"
+
+    if action == ACTION_OFF and humidity is not None:
+        if humidity >= config.dry_humidity_hard:
+            action, reason = ACTION_DRY, "humidity above hard max"
+        elif humidity >= config.dry_humidity_above and (surplus or cheap):
+            action, reason = (
+                ACTION_DRY,
+                "humid room on surplus" if surplus else "humid room in cheap half",
+            )
+        elif inputs.currently_drying and humidity > config.dry_humidity_stop:
+            action, reason = ACTION_DRY, "finishing dry run"
 
     return IlpResult(
         action=action,

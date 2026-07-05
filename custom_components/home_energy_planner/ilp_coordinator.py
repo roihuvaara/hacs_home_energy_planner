@@ -26,7 +26,14 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import PricingCoordinator
-from .ilp_core import ACTION_COOL, IlpConfig, IlpInputs, IlpResult, compute_ilp_action
+from .ilp_core import (
+    ACTION_COOL,
+    ACTION_DRY,
+    IlpConfig,
+    IlpInputs,
+    IlpResult,
+    compute_ilp_action,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,6 +45,7 @@ MODE_CONTROL = "control"
 DEFAULTS = {
     "ilp_climate_entity": "climate.living_room",
     "room_temp_entity": "sensor.olohuone_climate_lampotila",
+    "room_humidity_entity": "sensor.olohuone_climate_kosteus",
     "grid_power_entity": "sensor.solis_power_grid_total_power",
     "weather_entity": "weather.forecast_koti",
 }
@@ -51,12 +59,14 @@ class IlpData:
         effective_action: str,
         mode: str,
         room_temp: float | None,
+        room_humidity: float | None,
         applied: dict[str, Any] | None,
     ) -> None:
         self.result = result
         self.effective_action = effective_action
         self.mode = mode
         self.room_temp = room_temp
+        self.room_humidity = room_humidity
         self.applied = applied
 
 
@@ -180,10 +190,12 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         room_temp = self._float_state("room_temp_entity")
         inputs = IlpInputs(
             room_temp=room_temp,
+            room_humidity=self._float_state("room_humidity_entity"),
             grid_export_w=max(0.0, grid_power),
             future_all_in=future_all_in,
             outdoor_forecast_max_24h=await self._forecast_max_temp_24h(),
             currently_cooling=self._effective_action == ACTION_COOL,
+            currently_drying=self._effective_action == ACTION_DRY,
         )
         result = compute_ilp_action(inputs, self._config)
         effective = self._apply_dwell(result.action, dt_util.now())
@@ -197,6 +209,7 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
             effective_action=effective,
             mode=mode,
             room_temp=room_temp,
+            room_humidity=inputs.room_humidity,
             applied=applied,
         )
 
@@ -204,7 +217,7 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         entity_id = str(self._option("ilp_climate_entity"))
         state = self.hass.states.get(entity_id)
         current_mode = state.state if state else None
-        desired_mode = "cool" if action == ACTION_COOL else "off"
+        desired_mode = action if action in (ACTION_COOL, ACTION_DRY) else "off"
         if current_mode == desired_mode and action != ACTION_COOL:
             return {"success": True, "action": action, "written": False}
         # a mode we didn't set (dry, heat, manual cool) is a human choice:
@@ -222,14 +235,14 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
                 else None,
             }
         try:
+            if desired_mode != current_mode:
+                await self.hass.services.async_call(
+                    "climate",
+                    "set_hvac_mode",
+                    {"entity_id": entity_id, "hvac_mode": desired_mode},
+                    blocking=True,
+                )
             if action == ACTION_COOL:
-                if current_mode != "cool":
-                    await self.hass.services.async_call(
-                        "climate",
-                        "set_hvac_mode",
-                        {"entity_id": entity_id, "hvac_mode": "cool"},
-                        blocking=True,
-                    )
                 await self.hass.services.async_call(
                     "climate",
                     "set_temperature",
@@ -237,13 +250,6 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
                         "entity_id": entity_id,
                         "temperature": self._config.cool_target_temp,
                     },
-                    blocking=True,
-                )
-            elif current_mode != "off":
-                await self.hass.services.async_call(
-                    "climate",
-                    "set_hvac_mode",
-                    {"entity_id": entity_id, "hvac_mode": "off"},
                     blocking=True,
                 )
         except Exception as err:  # noqa: BLE001 - report, retry next tick

@@ -13,10 +13,12 @@ from home_energy_planner.ilp_core import (  # noqa: E402
 def make_inputs(**overrides):
     defaults = dict(
         room_temp=23.0,
+        room_humidity=50.0,
         grid_export_w=0.0,
         future_all_in=[12.0] * 96,
         outdoor_forecast_max_24h=20.0,
         currently_cooling=False,
+        currently_drying=False,
     )
     defaults.update(overrides)
     return IlpInputs(**defaults)
@@ -71,3 +73,40 @@ def test_comfortable_room_stays_off():
     assert result.action == "off"
     unknown = compute_ilp_action(make_inputs(room_temp=None, grid_export_w=2000.0))
     assert unknown.action == "off"
+
+
+def test_very_humid_room_dries_at_any_price():
+    expensive = [30.0] + [10.0] * 95
+    result = compute_ilp_action(
+        make_inputs(room_humidity=72.0, future_all_in=expensive)
+    )
+    assert result.action == "dry"
+    assert "hard max" in result.reason
+
+
+def test_humid_room_dries_on_surplus_or_cheap_only():
+    surplus = compute_ilp_action(make_inputs(room_humidity=65.0, grid_export_w=900.0))
+    assert surplus.action == "dry"
+    expensive = compute_ilp_action(
+        make_inputs(room_humidity=65.0, future_all_in=[20.0] + [10.0] * 95)
+    )
+    assert expensive.action == "off"
+
+
+def test_cooling_takes_priority_over_dry():
+    result = compute_ilp_action(
+        make_inputs(room_temp=26.0, room_humidity=75.0)
+    )
+    assert result.action == "cool"
+
+
+def test_dry_run_finishes_to_stop_threshold():
+    running = compute_ilp_action(make_inputs(room_humidity=58.0, currently_drying=True))
+    assert running.action == "dry"
+    done = compute_ilp_action(make_inputs(room_humidity=53.0, currently_drying=True))
+    assert done.action == "off"
+
+
+def test_unknown_humidity_never_dries():
+    result = compute_ilp_action(make_inputs(room_humidity=None, grid_export_w=2000.0))
+    assert result.action == "off"
