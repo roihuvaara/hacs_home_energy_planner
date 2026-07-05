@@ -86,6 +86,19 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         self._config = WaterHeaterConfig()
         self._effective_mode: str | None = None
         self._mode_since: datetime | None = None
+        from .manual_override import ManualOverrideTracker
+
+        self._override = ManualOverrideTracker()
+
+    def _override_hold(self) -> timedelta:
+        return timedelta(
+            hours=float(
+                self._entry.options.get(
+                    "manual_override_hours",
+                    self._entry.data.get("manual_override_hours", 4.0),
+                )
+            )
+        )
 
     def _apply_dwell(
         self, computed: str, export_w: float, now: datetime
@@ -206,15 +219,28 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         )
 
     async def _async_apply(self, target: int) -> dict[str, Any]:
+        from homeassistant.util import dt as dt_util
+
         entity_id = str(self._option("water_heater_entity"))
         state = self.hass.states.get(entity_id)
         current = state.attributes.get("temperature") if state else None
         try:
-            unchanged = current is not None and int(float(current)) == target
+            current_value = int(float(current)) if current is not None else None
         except (TypeError, ValueError):
-            unchanged = False
-        if unchanged:
+            current_value = None
+        if current_value is not None and current_value == target:
             return {"success": True, "written": False, "target": target}
+        if self._override.suppressed(
+            current_value, target, dt_util.now(), self._override_hold()
+        ):
+            return {
+                "success": True,
+                "written": False,
+                "target": target,
+                "manual_override_until": self._override.until.isoformat()
+                if self._override.until
+                else None,
+            }
         try:
             await self.hass.services.async_call(
                 "water_heater",
@@ -225,4 +251,5 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         except Exception as err:  # noqa: BLE001 - report, retry next tick
             _LOGGER.warning("Water heater target write failed: %s", err)
             return {"success": False, "written": False, "error": str(err)}
+        self._override.record_write(target)
         return {"success": True, "written": True, "target": target}

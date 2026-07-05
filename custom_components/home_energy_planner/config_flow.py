@@ -89,6 +89,13 @@ def _options_schema(current: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 "ilp_mode", default=_default("ilp_mode", "observe")
             ): vol.In(["off", "observe", "control"]),
+            vol.Optional(
+                "contracts_json", default=_default("contracts_json", "")
+            ): str,
+            vol.Optional(
+                "manual_override_hours",
+                default=_default("manual_override_hours", 4.0),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=48)),
         }
     )
 

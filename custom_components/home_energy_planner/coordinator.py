@@ -40,6 +40,7 @@ from .const import (
 )
 from .pricing import (
     PERIOD_MINUTES,
+    Contract,
     PricePeriod,
     PricingConfig,
     RawSlot,
@@ -110,6 +111,32 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
             day_start_hour=int(self._option(CONF_DAY_START_HOUR, DEFAULT_DAY_START_HOUR)),
             day_end_hour=int(self._option(CONF_DAY_END_HOUR, DEFAULT_DAY_END_HOUR)),
         )
+
+    def contracts(self) -> list[Contract]:
+        """Parse the contracts_json option.
+
+        Format: JSON list of {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD",
+        "type": "fixed"|"flexible", "energy_cents_vat_incl": float}.
+        """
+        import json
+
+        raw = str(self._option("contracts_json", "") or "").strip()
+        if not raw:
+            return []
+        try:
+            entries = json.loads(raw)
+            return [
+                Contract(
+                    start=date.fromisoformat(str(entry["start"])),
+                    end=date.fromisoformat(str(entry["end"])),
+                    type=str(entry["type"]),
+                    energy_cents_vat_incl=float(entry["energy_cents_vat_incl"]),
+                )
+                for entry in entries
+            ]
+        except (ValueError, KeyError, TypeError) as err:
+            _LOGGER.error("Invalid contracts_json ignored: %s", err)
+            return []
 
     def _nordpool_entry_id(self) -> str:
         configured = str(self._option(CONF_NORDPOOL_CONFIG_ENTRY_ID, "") or "").strip()
@@ -211,6 +238,7 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
             now=now,
             config=self.pricing_config(),
             local_tz=dt_util.get_default_time_zone(),
+            contracts=self.contracts(),
         )
         if not periods:
             raise UpdateFailed("Price horizon is empty")

@@ -71,6 +71,7 @@ class BatteryPlanData:
         engine: str,
         load_info: dict[str, Any],
         tank_windows: list[dict[str, Any]] | None,
+        input_periods: list[Period],
         applied: dict[str, Any] | None,
     ) -> None:
         self.plan = plan
@@ -80,6 +81,7 @@ class BatteryPlanData:
         self.engine = engine
         self.load_info = load_info
         self.tank_windows = tank_windows
+        self.input_periods = input_periods
         self.applied = applied
 
 
@@ -389,5 +391,6 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             engine,
             load_info,
             tank_windows,
+            periods,
             applied,
         )

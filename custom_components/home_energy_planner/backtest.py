@@ -146,6 +146,7 @@ async def async_backtest(
             now=day_start,
             config=config,
             local_tz=tz,
+            contracts=pricing.contracts(),
         )
         price_by_start = {p.start: p.all_in_cents_per_kwh for p in price_periods}
 

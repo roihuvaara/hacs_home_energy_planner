@@ -112,7 +112,9 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
     _attr_name = "Battery plan"
     _attr_native_unit_of_measurement = "%"
     _attr_icon = "mdi:battery-clock"
-    _unrecorded_attributes = frozenset({"actions", "charge_slots", "discharge_slots"})
+    _unrecorded_attributes = frozenset(
+        {"actions", "charge_slots", "discharge_slots", "series"}
+    )
 
     def __init__(self, coordinator: BatteryCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
@@ -162,6 +164,25 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
                 if p.action != "hold" or p.grid_charge_kwh > 0
             ][:64],
             "last_apply_success": (data.applied or {}).get("success"),
+            # aligned quarter-hour series for dashboard plotting
+            "series": {
+                "start": plan.periods[0].start.isoformat() if plan.periods else None,
+                "period_minutes": 15,
+                "price": [p.price_cents_per_kwh for p in plan.periods],
+                "soc_pct": [
+                    round(
+                        self.coordinator.battery_params().soc_from_buffer_kwh(
+                            p.buffer_end_kwh
+                        ),
+                        1,
+                    )
+                    for p in plan.periods
+                ],
+                "grid_charge_kwh": [p.grid_charge_kwh for p in plan.periods],
+                "discharge_kwh": [p.discharge_to_load_kwh for p in plan.periods],
+                "load_kwh": [p.load_kwh for p in data.input_periods],
+                "solar_kwh": [p.solar_kwh for p in data.input_periods],
+            },
         }
 
 
@@ -217,6 +238,12 @@ class ClimateTargetSensor(CoordinatorEntity[ClimateCoordinator], SensorEntity):
             "lead_hold_until": (
                 data.lead_hold_until.isoformat() if data.lead_hold_until else None
             ),
+            "manual_override_until": (
+                self.coordinator._override.until.isoformat()
+                if self.coordinator._override.until
+                else None
+            ),
+            "manual_override_count": self.coordinator._override.count,
             "legacy_target": data.legacy_target,
             "matches_legacy": (
                 data.legacy_target is not None
@@ -263,6 +290,12 @@ class WaterHeaterModeSensor(CoordinatorEntity[WaterHeaterCoordinator], SensorEnt
             "actual_surplus": result.actual_surplus,
             "buffer_preserve": result.buffer_preserve,
             "cheap_windows": result.cheap_windows,
+            "manual_override_until": (
+                self.coordinator._override.until.isoformat()
+                if self.coordinator._override.until
+                else None
+            ),
+            "manual_override_count": self.coordinator._override.count,
             "price_median": result.price_median,
             "price_delta": result.price_delta,
             "legacy_mode": data.legacy_mode,
@@ -367,5 +400,11 @@ class IlpRecommendationSensor(CoordinatorEntity[IlpCoordinator], SensorEntity):
             "room_temp": data.room_temp,
             "actual_surplus": result.actual_surplus,
             "price_delta": result.price_delta,
+            "manual_override_until": (
+                self.coordinator._override.until.isoformat()
+                if self.coordinator._override.until
+                else None
+            ),
+            "manual_override_count": self.coordinator._override.count,
             "last_apply": data.applied,
         }

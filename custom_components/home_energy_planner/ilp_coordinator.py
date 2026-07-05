@@ -73,6 +73,19 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         self._config = IlpConfig()
         self._effective_action: str | None = None
         self._action_since: datetime | None = None
+        from .manual_override import ManualOverrideTracker
+
+        self._override = ManualOverrideTracker()
+
+    def _override_hold(self) -> timedelta:
+        return timedelta(
+            hours=float(
+                self._entry.options.get(
+                    "manual_override_hours",
+                    self._entry.data.get("manual_override_hours", 4.0),
+                )
+            )
+        )
 
     def _option(self, key: str) -> Any:
         return self._entry.options.get(
@@ -191,6 +204,23 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         entity_id = str(self._option("ilp_climate_entity"))
         state = self.hass.states.get(entity_id)
         current_mode = state.state if state else None
+        desired_mode = "cool" if action == ACTION_COOL else "off"
+        if current_mode == desired_mode and action != ACTION_COOL:
+            return {"success": True, "action": action, "written": False}
+        # a mode we didn't set (dry, heat, manual cool) is a human choice:
+        # respected for the hold window, then the plan takes over again;
+        # every detection is counted as preference-learning input
+        if self._override.suppressed(
+            current_mode, desired_mode, dt_util.now(), self._override_hold()
+        ):
+            return {
+                "success": True,
+                "action": action,
+                "written": False,
+                "manual_override_until": self._override.until.isoformat()
+                if self._override.until
+                else None,
+            }
         try:
             if action == ACTION_COOL:
                 if current_mode != "cool":
@@ -209,8 +239,7 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
                     },
                     blocking=True,
                 )
-            elif current_mode == "cool":
-                # only stop runs this module started; leave manual dry/fan alone
+            elif current_mode != "off":
                 await self.hass.services.async_call(
                     "climate",
                     "set_hvac_mode",
@@ -220,4 +249,5 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         except Exception as err:  # noqa: BLE001 - report, retry next tick
             _LOGGER.warning("ILP write failed: %s", err)
             return {"success": False, "error": str(err)}
-        return {"success": True, "action": action}
+        self._override.record_write(desired_mode)
+        return {"success": True, "action": action, "written": True}

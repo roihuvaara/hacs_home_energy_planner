@@ -7,7 +7,7 @@ No Home Assistant imports; unit-testable standalone.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, tzinfo
+from datetime import date, datetime, timedelta, tzinfo
 
 
 PERIOD_MINUTES = 15
@@ -28,6 +28,38 @@ class PricingConfig:
     night_transfer_cents_per_kwh: float = 3.12
     day_start_hour: int = 7
     day_end_hour: int = 22
+
+
+@dataclass(frozen=True)
+class Contract:
+    """A date-ranged energy contract overriding the default spot pricing.
+
+    Types (Finnish consumer market, researched 2026-07-06):
+    - "fixed": energy price is flat for the term; marginal all-in price
+      per period = energy_cents_vat_incl + transfer. Price-shifting
+      stops paying by construction; solar self-use still does.
+    - "flexible" (joustosähkö): fixed baseline ± monthly consumption
+      effect = (consumption-weighted avg spot) - (calendar-month mean
+      spot). The marginal price of period t is therefore
+      baseline + (spot_vat_t - monthly_mean_vat) + transfer — the spot
+      *shape* still drives shifting, anchored to the baseline. The
+      monthly mean is approximated by the mean over the available
+      horizon (settlement uses the calendar month).
+
+    Dates are inclusive, evaluated in local time.
+    """
+
+    start: date
+    end: date
+    type: str  # "fixed" | "flexible"
+    energy_cents_vat_incl: float
+
+
+def contract_for(contracts: list[Contract], day: date) -> Contract | None:
+    for contract in contracts:
+        if contract.start <= day <= contract.end:
+            return contract
+    return None
 
 
 @dataclass(frozen=True)
@@ -67,35 +99,56 @@ def build_price_horizon(
     now: datetime,
     config: PricingConfig,
     local_tz: tzinfo,
+    contracts: list[Contract] | None = None,
 ) -> list[PricePeriod]:
     """Compute the forward horizon from the current quarter-hour onward.
 
     Slots are deduplicated by start (first occurrence wins) and sorted.
-    The transfer fee window is evaluated in ``local_tz``.
+    The transfer fee window is evaluated in ``local_tz``. When a contract
+    covers a slot's local date, the all-in energy component follows the
+    contract instead of spot+margin; raw/vat fields always carry the spot
+    values (export revenue and curtailment stay spot-based regardless of
+    the purchase contract).
     """
 
     cutoff = floor_to_period(now)
     seen: set[datetime] = set()
-    periods: list[PricePeriod] = []
+    prepared: list[tuple[datetime, float, float, int, Contract | None]] = []
+    vat_sum = 0.0
     for slot in sorted(raw_slots, key=lambda item: item.start):
         if slot.start < cutoff or slot.start in seen:
             continue
         seen.add(slot.start)
         raw_cents = round(raw_to_cents_per_kwh(slot.price_eur_per_mwh), 4)
         vat_cents = round(raw_cents * (1 + config.vat_rate), 4)
-        local_hour = slot.start.astimezone(local_tz).hour
-        all_in = round(
-            vat_cents
-            + config.margin_cents_per_kwh
-            + transfer_cents_for_hour(config, local_hour),
-            4,
+        local = slot.start.astimezone(local_tz)
+        prepared.append(
+            (
+                slot.start,
+                raw_cents,
+                vat_cents,
+                local.hour,
+                contract_for(contracts, local.date()) if contracts else None,
+            )
         )
+        vat_sum += vat_cents
+    mean_vat = vat_sum / len(prepared) if prepared else 0.0
+
+    periods: list[PricePeriod] = []
+    for start, raw_cents, vat_cents, local_hour, contract in prepared:
+        transfer = transfer_cents_for_hour(config, local_hour)
+        if contract is None:
+            energy = vat_cents + config.margin_cents_per_kwh
+        elif contract.type == "fixed":
+            energy = contract.energy_cents_vat_incl
+        else:  # flexible: baseline anchored, spot shape preserved
+            energy = contract.energy_cents_vat_incl + (vat_cents - mean_vat)
         periods.append(
             PricePeriod(
-                start=slot.start,
+                start=start,
                 raw_cents_per_kwh=raw_cents,
                 vat_cents_per_kwh=vat_cents,
-                all_in_cents_per_kwh=all_in,
+                all_in_cents_per_kwh=round(energy + transfer, 4),
             )
         )
     return periods

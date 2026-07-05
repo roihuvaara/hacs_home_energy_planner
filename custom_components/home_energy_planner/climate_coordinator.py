@@ -83,6 +83,19 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         self._config = ClimateConfig()
         self._lead_hold_until: datetime | None = None
         self._last_write: tuple[float, datetime] | None = None
+        from .manual_override import ManualOverrideTracker
+
+        self._override = ManualOverrideTracker()
+
+    def _override_hold(self) -> timedelta:
+        return timedelta(
+            hours=float(
+                self._entry.options.get(
+                    "manual_override_hours",
+                    self._entry.data.get("manual_override_hours", 4.0),
+                )
+            )
+        )
 
     def _option(self, key: str) -> Any:
         return self._entry.options.get(
@@ -226,11 +239,24 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         state = self.hass.states.get(climate_entity)
         current = state.attributes.get("temperature") if state else None
         try:
-            unchanged = current is not None and float(current) == target
+            current_value = float(current) if current is not None else None
         except (TypeError, ValueError):
-            unchanged = False
+            current_value = None
+        unchanged = current_value is not None and current_value == target
         if unchanged:
             return {"success": True, "written": False, "target": target}
+        now_check = dt_util.now()
+        if self._override.suppressed(
+            current_value, target, now_check, self._override_hold()
+        ):
+            return {
+                "success": True,
+                "written": False,
+                "target": target,
+                "manual_override_until": self._override.until.isoformat()
+                if self._override.until
+                else None,
+            }
         # setpoint dwell: a 1-degree wiggle within half an hour of the last
         # write is deferred so price-quartile flapping cannot short-cycle
         # the heat pump; bigger moves (comfort, cold dip, spikes) go through
@@ -258,4 +284,5 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             _LOGGER.warning("Climate target write failed: %s", err)
             return {"success": False, "written": False, "error": str(err)}
         self._last_write = (target, now)
+        self._override.record_write(target)
         return {"success": True, "written": True, "target": target}
