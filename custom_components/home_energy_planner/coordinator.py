@@ -96,7 +96,7 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
     def _option(self, key: str, default: Any) -> Any:
         return self._entry.options.get(key, self._entry.data.get(key, default))
 
-    def _pricing_config(self) -> PricingConfig:
+    def pricing_config(self) -> PricingConfig:
         return PricingConfig(
             vat_rate=float(self._option(CONF_VAT_RATE_PCT, DEFAULT_VAT_RATE_PCT)) / 100.0,
             margin_cents_per_kwh=float(self._option(CONF_MARGIN_CENTS, DEFAULT_MARGIN_CENTS)),
@@ -121,7 +121,7 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
             raise UpdateFailed("No nordpool config entry found")
         return candidates[0].entry_id
 
-    async def _async_fetch_day(self, target_date: date) -> list[RawSlot]:
+    async def async_fetch_day(self, target_date: date) -> list[RawSlot]:
         area = str(self._option(CONF_AREA, DEFAULT_AREA))
         response = await self.hass.services.async_call(
             NORDPOOL_DOMAIN,
@@ -157,7 +157,7 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
         }
 
         try:
-            self._raw_slots_by_date[today] = await self._async_fetch_day(today)
+            self._raw_slots_by_date[today] = await self.async_fetch_day(today)
         except UpdateFailed:
             raise
         except Exception as err:
@@ -170,7 +170,7 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
         )
         if now.hour >= tomorrow_fetch_hour and tomorrow not in self._raw_slots_by_date:
             try:
-                slots = await self._async_fetch_day(tomorrow)
+                slots = await self.async_fetch_day(tomorrow)
                 if slots:
                     self._raw_slots_by_date[tomorrow] = slots
             except Exception as err:
@@ -185,7 +185,7 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
         periods = build_price_horizon(
             raw_slots,
             now=now,
-            config=self._pricing_config(),
+            config=self.pricing_config(),
             local_tz=dt_util.get_default_time_zone(),
         )
         if not periods:

@@ -47,3 +47,121 @@ solis_apply_slots:
 solis_read_slots:
   name: Read Solis slot tables
   description: Return the current charge/discharge slot tables and any cross-side wall-clock overlaps.
+
+simulate_plan:
+  name: Simulate battery plan
+  description: >-
+    Run the real battery solve/compile path on supplied inputs and return the
+    dispatch plan plus compiled slot tables. Writes nothing. Anything omitted
+    falls back to live data: the current price horizon, the 7-day load
+    baseline, the solar forecast, and the current battery state.
+  fields:
+    prices:
+      name: Prices
+      description: Quarter-hour all-in prices in cents/kWh. Omit to use the live price horizon.
+      required: false
+      selector:
+        object:
+    start:
+      name: Start
+      description: ISO start time of the first price period (used only with an explicit price series; defaults to the current quarter).
+      required: false
+      selector:
+        text:
+    load:
+      name: Load
+      description: Load kWh per quarter-hour, a single number or a list (shorter lists are padded with the last value). Omit for the 7-day baseline.
+      required: false
+      selector:
+        object:
+    solar:
+      name: Solar
+      description: Solar kWh per quarter-hour, a single number or a list. Omit for the live forecast series.
+      required: false
+      selector:
+        object:
+    soc_pct:
+      name: Battery SOC
+      description: Starting state of charge percent. Omit for the live value.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+    reserve_soc_pct:
+      name: Reserve SOC
+      description: Reserve floor percent. Omit for the live value.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+    capacity_kwh:
+      name: Capacity
+      description: Battery capacity kWh override.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.01
+    max_charge_current:
+      name: Max charge current
+      description: Ampere override.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+    max_discharge_current:
+      name: Max discharge current
+      description: Ampere override.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+
+backtest:
+  name: Backtest planner against recorded history
+  description: >-
+    Replay the last N full days through the planner using recorder statistics
+    for load and solar plus historical Nord Pool prices. Reports baseline
+    (no battery) vs planned (perfect-foresight dispatch) vs actual cost per
+    day. Read-only; this is the ADR 0009 pre-control gate report.
+  fields:
+    days:
+      name: Days
+      description: Number of full days to replay, ending yesterday.
+      required: false
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 60
+    load_entity:
+      name: Load entity
+      description: Power or energy entity for house load. Defaults to the configured load entity.
+      required: false
+      selector:
+        entity:
+    solar_entity:
+      name: Solar entity
+      description: Power or energy entity for solar actuals.
+      required: false
+      selector:
+        entity:
+    grid_import_entity:
+      name: Grid import entity
+      description: Power or energy entity for actual grid import (actual-cost column). Defaults to the daily grid energy purchased counter.
+      required: false
+      selector:
+        entity:
+    initial_soc_pct:
+      name: Initial SOC
+      description: State of charge at the start of the first day. Defaults to the reserve floor.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100

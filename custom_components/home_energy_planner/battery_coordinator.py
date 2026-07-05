@@ -110,7 +110,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         except (AttributeError, TypeError, ValueError):
             return fallback
 
-    async def _load_baseline_kwh_by_quarter(self, now: datetime) -> dict[int, float]:
+    async def load_baseline_kwh_by_quarter(self, now: datetime) -> dict[int, float]:
         """Mean load kWh per quarter-hour-of-day from 7 days of recorder stats."""
         from homeassistant.components.recorder.statistics import (
             statistics_during_period,
@@ -147,7 +147,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             for bucket in sums
         }
 
-    def _solar_series_kwh(self, starts: list[datetime], now: datetime) -> list[float]:
+    def solar_series_kwh(self, starts: list[datetime], now: datetime) -> list[float]:
         """Distribute daily-total solar forecasts over a daylight bell curve.
 
         Baseline quality on purpose (ADR 0009: baseline to beat); a proper
@@ -178,6 +178,24 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             result.append(0.0)
         return result
 
+    def battery_params(self, overrides: dict[str, Any] | None = None) -> BatteryParams:
+        """Battery parameters from live state/options, with explicit overrides."""
+        values = {
+            "capacity_kwh": float(self._option("battery_capacity_kwh")),
+            "state_of_health_pct": float(self._option("battery_soh_pct")),
+            "soc_pct": self._float_state("battery_soc_entity", 0.0),
+            "reserve_soc_pct": self._float_state("battery_reserve_entity", 18.0),
+            "max_charge_current": int(self._float_state("battery_max_charge_entity", 25.0)),
+            "max_discharge_current": int(
+                self._float_state("battery_max_discharge_entity", 25.0)
+            ),
+        }
+        for key, value in (overrides or {}).items():
+            if value is None or key not in values:
+                continue
+            values[key] = int(value) if key.startswith("max_") else float(value)
+        return BatteryParams(**values)
+
     async def _async_update_data(self) -> BatteryPlanData:
         mode = self.mode
         pricing = self._pricing.data
@@ -188,8 +206,8 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
 
         now = dt_util.now()
         starts = [p.start for p in pricing.periods]
-        load_by_quarter = await self._load_baseline_kwh_by_quarter(now)
-        solar = self._solar_series_kwh(starts, now)
+        load_by_quarter = await self.load_baseline_kwh_by_quarter(now)
+        solar = self.solar_series_kwh(starts, now)
 
         periods = []
         for index, price_period in enumerate(pricing.periods):
@@ -204,16 +222,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
                 )
             )
 
-        battery = BatteryParams(
-            capacity_kwh=float(self._option("battery_capacity_kwh")),
-            state_of_health_pct=float(self._option("battery_soh_pct")),
-            soc_pct=self._float_state("battery_soc_entity", 0.0),
-            reserve_soc_pct=self._float_state("battery_reserve_entity", 18.0),
-            max_charge_current=int(self._float_state("battery_max_charge_entity", 25.0)),
-            max_discharge_current=int(
-                self._float_state("battery_max_discharge_entity", 25.0)
-            ),
-        )
+        battery = self.battery_params()
 
         plan = await self.hass.async_add_executor_job(solve, periods, battery)
         charge_slots, discharge_slots = compile_slots(plan.periods, battery)

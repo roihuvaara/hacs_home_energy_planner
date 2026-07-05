@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import DOMAIN, PLATFORMS
 from .coordinator import PricingCoordinator
@@ -53,11 +54,35 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def handle_read_slots(call: ServiceCall) -> ServiceResponse:
         return await read_slots(hass)
 
+    def _coordinators() -> tuple[PricingCoordinator, "BatteryCoordinator"]:
+        for bundle in hass.data.get(DOMAIN, {}).values():
+            if isinstance(bundle, dict) and "pricing" in bundle:
+                return bundle["pricing"], bundle["battery"]
+        raise HomeAssistantError("home_energy_planner is not set up")
+
+    async def handle_simulate_plan(call: ServiceCall) -> ServiceResponse:
+        from .simulation import async_simulate_plan
+
+        pricing, battery = _coordinators()
+        return await async_simulate_plan(pricing, battery, dict(call.data))
+
+    async def handle_backtest(call: ServiceCall) -> ServiceResponse:
+        from .backtest import async_backtest
+
+        pricing, battery = _coordinators()
+        return await async_backtest(pricing, battery, dict(call.data))
+
     hass.services.async_register(
         DOMAIN, "solis_apply_slots", handle_apply_slots, supports_response="optional"
     )
     hass.services.async_register(
         DOMAIN, "solis_read_slots", handle_read_slots, supports_response="only"
+    )
+    hass.services.async_register(
+        DOMAIN, "simulate_plan", handle_simulate_plan, supports_response="only"
+    )
+    hass.services.async_register(
+        DOMAIN, "backtest", handle_backtest, supports_response="only"
     )
 
 
