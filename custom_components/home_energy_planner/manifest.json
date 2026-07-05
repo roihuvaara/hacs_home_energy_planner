@@ -1,0 +1,14 @@
+{
+  "domain": "home_energy_planner",
+  "name": "Home Energy Planner",
+  "codeowners": ["@roihuvaara"],
+  "config_flow": true,
+  "dependencies": [],
+  "after_dependencies": ["nordpool"],
+  "documentation": "https://github.com/roihuvaara/hacs_home_energy_planner",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/roihuvaara/hacs_home_energy_planner/issues",
+  "requirements": [],
+  "version": "0.1.0",
+  "homeassistant": "2025.1.0"
+}

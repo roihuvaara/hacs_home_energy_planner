@@ -1,0 +1,51 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Home Energy Planner",
+        "description": "Pricing constants applied on top of the Nord Pool spot price. Leave the Nord Pool entry id empty to auto-discover.",
+        "data": {
+          "area": "Nord Pool area",
+          "currency": "Currency",
+          "vat_rate_pct": "VAT rate (%)",
+          "margin_cents_per_kwh": "Seller margin (c/kWh)",
+          "day_transfer_cents_per_kwh": "Day transfer fee (c/kWh)",
+          "night_transfer_cents_per_kwh": "Night transfer fee (c/kWh)",
+          "day_start_hour": "Day transfer window start hour",
+          "day_end_hour": "Day transfer window end hour",
+          "tomorrow_fetch_hour": "Hour to start fetching tomorrow's prices",
+          "nordpool_config_entry_id": "Nord Pool config entry id (optional)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Home Energy Planner is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Home Energy Planner options",
+        "data": {
+          "area": "Nord Pool area",
+          "currency": "Currency",
+          "vat_rate_pct": "VAT rate (%)",
+          "margin_cents_per_kwh": "Seller margin (c/kWh)",
+          "day_transfer_cents_per_kwh": "Day transfer fee (c/kWh)",
+          "night_transfer_cents_per_kwh": "Night transfer fee (c/kWh)",
+          "day_start_hour": "Day transfer window start hour",
+          "day_end_hour": "Day transfer window end hour",
+          "tomorrow_fetch_hour": "Hour to start fetching tomorrow's prices",
+          "nordpool_config_entry_id": "Nord Pool config entry id (optional)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "spot_price": { "name": "Spot price" },
+      "price_with_vat": { "name": "Price with VAT" },
+      "all_in_price": { "name": "All-in price" }
+    }
+  }
+}
