@@ -15,7 +15,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
     coordinator.async_schedule_quarter_ticks()
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    from .battery_coordinator import MODE_OFF, BatteryCoordinator
+
+    battery = BatteryCoordinator(hass, entry, coordinator)
+    if battery.mode != MODE_OFF:
+        await battery.async_refresh()
+        battery.async_schedule_ticks()
+
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
+        "pricing": coordinator,
+        "battery": battery,
+    }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     _async_register_services(hass)

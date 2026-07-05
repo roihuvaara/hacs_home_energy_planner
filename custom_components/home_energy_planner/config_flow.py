@@ -77,6 +77,9 @@ def _options_schema(current: dict[str, Any]) -> vol.Schema:
                 CONF_NORDPOOL_CONFIG_ENTRY_ID,
                 default=_default(CONF_NORDPOOL_CONFIG_ENTRY_ID, ""),
             ): str,
+            vol.Optional(
+                "battery_mode", default=_default("battery_mode", "observe")
+            ): vol.In(["off", "observe", "control"]),
         }
     )
 

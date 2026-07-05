@@ -14,7 +14,8 @@
           "day_start_hour": "Day transfer window start hour",
           "day_end_hour": "Day transfer window end hour",
           "tomorrow_fetch_hour": "Hour to start fetching tomorrow's prices",
-          "nordpool_config_entry_id": "Nord Pool config entry id (optional)"
+          "nordpool_config_entry_id": "Nord Pool config entry id (optional)",
+          "battery_mode": "Battery module mode (off / observe / control)"
         }
       }
     },
@@ -36,16 +37,23 @@
           "day_start_hour": "Day transfer window start hour",
           "day_end_hour": "Day transfer window end hour",
           "tomorrow_fetch_hour": "Hour to start fetching tomorrow's prices",
-          "nordpool_config_entry_id": "Nord Pool config entry id (optional)"
+          "nordpool_config_entry_id": "Nord Pool config entry id (optional)",
+          "battery_mode": "Battery module mode (off / observe / control)"
         }
       }
     }
   },
   "entity": {
     "sensor": {
-      "spot_price": { "name": "Spot price" },
-      "price_with_vat": { "name": "Price with VAT" },
-      "all_in_price": { "name": "All-in price" }
+      "spot_price": {
+        "name": "Spot price"
+      },
+      "price_with_vat": {
+        "name": "Price with VAT"
+      },
+      "all_in_price": {
+        "name": "All-in price"
+      }
     }
   }
 }
