@@ -107,6 +107,8 @@ class Debouncer:
 
 
 class PlannerWatchdog:
+    STARTUP_GRACE = timedelta(minutes=15)
+
     def __init__(self, hass, entry_id: str) -> None:
         self.hass = hass
         self._entry_id = entry_id
@@ -114,6 +116,9 @@ class PlannerWatchdog:
         self._apply_failing_since: datetime | None = None
         self._engine_fallback_since: datetime | None = None
         self._last_report_month: tuple[int, int] | None = None
+        from homeassistant.util import dt as dt_util
+
+        self._started = dt_util.now()
 
     def _bundle(self) -> dict[str, Any] | None:
         from .const import DOMAIN
@@ -133,12 +138,17 @@ class PlannerWatchdog:
             horizon_hours = len(data.periods) * 0.25
 
         stale: list[str] = []
-        for entity_id in CRITICAL_INPUTS:
-            state = self.hass.states.get(entity_id)
-            if state is None or state.state in ("unavailable", "unknown"):
-                stale.append(entity_id)
-            elif (now - state.last_updated).total_seconds() > INPUT_STALE_HOURS * 3600:
-                stale.append(entity_id)
+        # restored states keep pre-restart last_updated until integrations
+        # poll, so skip input staleness during the startup grace window
+        if now - self._started >= self.STARTUP_GRACE:
+            for entity_id in CRITICAL_INPUTS:
+                state = self.hass.states.get(entity_id)
+                if state is None or state.state in ("unavailable", "unknown"):
+                    stale.append(entity_id)
+                elif (
+                    now - state.last_updated
+                ).total_seconds() > INPUT_STALE_HOURS * 3600:
+                    stale.append(entity_id)
 
         battery = bundle.get("battery")
         battery_data = getattr(battery, "data", None)
