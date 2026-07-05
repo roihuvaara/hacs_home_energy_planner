@@ -10,7 +10,13 @@ maintainer's separate (non-public) Home Assistant docs repository.
 
 ## Status
 
-Phase 0: **pricing module** only.
+Phase 0 (pricing) plus the Phase 1a **Solis slot writer**.
+
+The writer services (`solis_apply_slots`, `solis_read_slots`) do diff-based
+ordered writes with per-op retry, cross-side wall-clock overlap validation,
+and two-stage verification (immediate readback plus a delayed re-check that
+catches device-side reverts). They double as the probe harness for
+re-verifying Solis slot semantics before the battery planner lands.
 
 - Fetches the Nord Pool quarter-hour spot series from the `nordpool`
   integration (today, plus tomorrow once published).

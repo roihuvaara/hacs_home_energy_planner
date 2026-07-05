@@ -1,0 +1,49 @@
+solis_apply_slots:
+  name: Apply Solis slot tables
+  description: >-
+    Diff-based write of the Solis charge/discharge slot tables. Only changed
+    fields are written (disables first, enables last), each write is retried,
+    and the result is verified immediately plus again after a delay to catch
+    device-side reverts. Runs validation and cross-side wall-clock overlap
+    checks before touching the inverter.
+  fields:
+    charge_slots:
+      name: Charge slots
+      description: List of up to 6 slots ({time, enabled, current, soc}); missing slots become disabled 00:00-00:00.
+      required: false
+      selector:
+        object:
+    discharge_slots:
+      name: Discharge slots
+      description: List of up to 6 slots ({time, enabled, current, soc}); missing slots become disabled 00:00-00:00.
+      required: false
+      selector:
+        object:
+    dry_run:
+      name: Dry run
+      description: Plan and return the write ops without executing them.
+      required: false
+      default: false
+      selector:
+        boolean:
+    allow_cross_side_overlap:
+      name: Allow cross-side overlap
+      description: Permit charge and discharge windows that collide in wall-clock time (probing only).
+      required: false
+      default: false
+      selector:
+        boolean:
+    reverify_delay_seconds:
+      name: Re-verify delay
+      description: Seconds until the delayed second verification pass (0 disables it).
+      required: false
+      default: 180
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: s
+
+solis_read_slots:
+  name: Read Solis slot tables
+  description: Return the current charge/discharge slot tables and any cross-side wall-clock overlaps.
