@@ -78,17 +78,17 @@ def test_comfortable_room_stays_off():
 def test_very_humid_room_dries_at_any_price():
     expensive = [30.0] + [10.0] * 95
     result = compute_ilp_action(
-        make_inputs(room_humidity=72.0, future_all_in=expensive)
+        make_inputs(room_humidity=60.0, future_all_in=expensive)
     )
     assert result.action == "dry"
     assert "hard max" in result.reason
 
 
 def test_humid_room_dries_on_surplus_or_cheap_only():
-    surplus = compute_ilp_action(make_inputs(room_humidity=65.0, grid_export_w=900.0))
+    surplus = compute_ilp_action(make_inputs(room_humidity=52.0, grid_export_w=900.0))
     assert surplus.action == "dry"
     expensive = compute_ilp_action(
-        make_inputs(room_humidity=65.0, future_all_in=[20.0] + [10.0] * 95)
+        make_inputs(room_humidity=52.0, future_all_in=[20.0] + [10.0] * 95)
     )
     assert expensive.action == "off"
 
@@ -101,9 +101,9 @@ def test_cooling_takes_priority_over_dry():
 
 
 def test_dry_run_finishes_to_stop_threshold():
-    running = compute_ilp_action(make_inputs(room_humidity=58.0, currently_drying=True))
+    running = compute_ilp_action(make_inputs(room_humidity=47.0, currently_drying=True))
     assert running.action == "dry"
-    done = compute_ilp_action(make_inputs(room_humidity=53.0, currently_drying=True))
+    done = compute_ilp_action(make_inputs(room_humidity=43.0, currently_drying=True))
     assert done.action == "off"
 
 

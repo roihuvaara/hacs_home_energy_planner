@@ -34,10 +34,14 @@ class IlpConfig:
     hot_day_outdoor_max: float = 25.0  # forecast max that marks a hot day
     price_window_quarters: int = 96
     # humidity comfort (living-room Aqara): cooling already dehumidifies,
-    # so dry only runs when temperature does not call for cooling
-    dry_humidity_above: float = 62.0  # dry when humid AND energy cheap/free
-    dry_humidity_hard: float = 70.0  # dry at any price above this
-    dry_humidity_stop: float = 55.0  # keep drying until back here
+    # so dry only runs when temperature does not call for cooling.
+    # Band fitted to the household's revealed preference (2026-07-06,
+    # 14 days of manual dry usage): maintained means 44-48 %, action
+    # taken around 50, post-run minima 42-45 — not the generic 30-60 %
+    # comfort guidance.
+    dry_humidity_above: float = 50.0  # dry when humid AND energy cheap/free
+    dry_humidity_hard: float = 58.0  # dry at any price above this
+    dry_humidity_stop: float = 44.0  # keep drying until back here
 
 
 @dataclass(frozen=True)
