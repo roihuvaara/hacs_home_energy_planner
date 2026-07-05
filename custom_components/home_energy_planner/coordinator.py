@@ -44,6 +44,7 @@ from .pricing import (
     PricingConfig,
     RawSlot,
     build_price_horizon,
+    floor_to_period,
     horizon_is_contiguous,
 )
 
@@ -150,10 +151,13 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
         now = dt_util.now()
         today = now.date()
         tomorrow = today + timedelta(days=1)
+        # Keep yesterday's fetch: Nord Pool dates follow the CET market day,
+        # so between local midnight and the CET one it still covers the
+        # current period.
         self._raw_slots_by_date = {
             slot_date: slots
             for slot_date, slots in self._raw_slots_by_date.items()
-            if slot_date >= today
+            if slot_date >= today - timedelta(days=1)
         }
 
         try:
@@ -164,6 +168,26 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
             if today not in self._raw_slots_by_date:
                 raise UpdateFailed(f"Fetching today's prices failed: {err}") from err
             _LOGGER.warning("Reusing cached prices for %s: %s", today, err)
+
+        # After a restart in the local-midnight-to-CET-midnight hour the
+        # today fetch alone starts in the future; backfill from yesterday.
+        yesterday = today - timedelta(days=1)
+        today_starts = [
+            slot.start
+            for slot in self._raw_slots_by_date.get(today, [])
+            if slot.start is not None
+        ]
+        if (
+            yesterday not in self._raw_slots_by_date
+            and today_starts
+            and min(today_starts) > floor_to_period(now)
+        ):
+            try:
+                self._raw_slots_by_date[yesterday] = await self.async_fetch_day(
+                    yesterday
+                )
+            except Exception as err:
+                _LOGGER.debug("Yesterday's prices not available: %s", err)
 
         tomorrow_fetch_hour = int(
             self._option(CONF_TOMORROW_FETCH_HOUR, DEFAULT_TOMORROW_FETCH_HOUR)

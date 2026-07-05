@@ -113,6 +113,16 @@ async def async_backtest(
     base_params = battery.battery_params()
     soc = float(data.get("initial_soc_pct", base_params.reserve_soc_pct))
 
+    # Nord Pool serves dates in the CET market timezone, so one fetched
+    # "day" does not cover the local (EET) day's first hour; merge each
+    # day with the previous day's fetch.
+    price_cache: dict[date_type, list] = {}
+
+    async def fetch_day_cached(target: date_type) -> list:
+        if target not in price_cache:
+            price_cache[target] = await pricing.async_fetch_day(target)
+        return price_cache[target]
+
     day_rows: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     totals = {"baseline_cents": 0.0, "planned_cents": 0.0, "actual_cents": 0.0}
@@ -124,7 +134,9 @@ async def async_backtest(
         day: date_type = day_start.astimezone(tz).date()
 
         try:
-            raw_slots = await pricing.async_fetch_day(day)
+            raw_slots = await fetch_day_cached(
+                day - timedelta(days=1)
+            ) + await fetch_day_cached(day)
         except Exception as err:  # noqa: BLE001 - report and continue
             skipped.append({"date": day.isoformat(), "reason": f"price fetch: {err}"})
             continue
