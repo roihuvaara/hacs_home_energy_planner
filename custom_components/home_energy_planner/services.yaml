@@ -165,3 +165,22 @@ backtest:
         number:
           min: 0
           max: 100
+
+set_mode:
+  name: Set module mode
+  description: Switch a planner module between off, observe, and control (reloads the integration).
+  fields:
+    module:
+      name: Module
+      description: Which planner module to switch.
+      required: true
+      selector:
+        select:
+          options: ["battery", "climate", "water_heater", "ilp"]
+    mode:
+      name: Mode
+      description: off computes nothing, observe publishes without writing, control also writes to the device.
+      required: true
+      selector:
+        select:
+          options: ["off", "observe", "control"]

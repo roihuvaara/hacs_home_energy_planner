@@ -93,6 +93,21 @@ def _async_register_services(hass: HomeAssistant) -> None:
         pricing, battery = _coordinators()
         return await async_backtest(pricing, battery, dict(call.data))
 
+    async def handle_set_mode(call: ServiceCall) -> None:
+        module = str(call.data["module"])
+        mode = str(call.data["mode"])
+        if module not in ("battery", "climate", "water_heater", "ilp"):
+            raise HomeAssistantError(f"Unknown module '{module}'")
+        if mode not in ("off", "observe", "control"):
+            raise HomeAssistantError(f"Unknown mode '{mode}'")
+        for entry_id in list(hass.data.get(DOMAIN, {})):
+            entry = hass.config_entries.async_get_entry(entry_id)
+            if entry is None:
+                continue
+            hass.config_entries.async_update_entry(
+                entry, options={**entry.options, f"{module}_mode": mode}
+            )
+
     hass.services.async_register(
         DOMAIN, "solis_apply_slots", handle_apply_slots, supports_response="optional"
     )
@@ -105,6 +120,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(
         DOMAIN, "backtest", handle_backtest, supports_response="only"
     )
+    hass.services.async_register(DOMAIN, "set_mode", handle_set_mode)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
