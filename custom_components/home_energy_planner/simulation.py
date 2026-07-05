@@ -15,9 +15,10 @@ from typing import Any
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
-from .battery_core import PERIOD_MINUTES, Period, compile_slots, solve
+from .battery_core import PERIOD_MINUTES, Period, compile_slots
 from .battery_coordinator import BatteryCoordinator
 from .coordinator import PricingCoordinator
+from .milp_core import solve_best
 
 
 def _quarter_bucket(ts: datetime, tz) -> int:
@@ -108,11 +109,14 @@ async def async_simulate_plan(
         for ts, price, load, solar in zip(starts, price_series, load_series, solar_series)
     ]
 
-    plan = await hass.async_add_executor_job(solve, periods, params)
+    plan, engine = await hass.async_add_executor_job(
+        solve_best, periods, params, str(data.get("engine", "lp"))
+    )
     charge_slots, discharge_slots = compile_slots(plan.periods, params)
 
     return {
         "summary": {
+            "engine": engine,
             "periods": count,
             "start": starts[0].isoformat(),
             "end": (starts[-1] + timedelta(minutes=PERIOD_MINUTES)).isoformat(),

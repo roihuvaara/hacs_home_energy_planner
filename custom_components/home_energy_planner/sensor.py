@@ -137,6 +137,7 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
         plan = data.plan
         return {
             "mode": data.mode,
+            "engine": data.engine,
             "planned_cost_cents": plan.total_cost_cents,
             "baseline_cost_cents": plan.baseline_cost_cents,
             "planned_saving_cents": round(

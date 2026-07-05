@@ -24,7 +24,6 @@ from .battery_core import (
     DispatchPlan,
     Period,
     compile_slots,
-    solve,
 )
 from .const import DOMAIN
 from .coordinator import PricingCoordinator
@@ -48,6 +47,7 @@ DEFAULTS = {
     "solar_tomorrow_entity": "sensor.energy_production_tomorrow",
     "battery_capacity_kwh": 5.12,
     "battery_soh_pct": 97.0,
+    "battery_engine": "lp",
 }
 
 
@@ -58,12 +58,14 @@ class BatteryPlanData:
         charge_slots: list[SlotSpec],
         discharge_slots: list[SlotSpec],
         mode: str,
+        engine: str,
         applied: dict[str, Any] | None,
     ) -> None:
         self.plan = plan
         self.charge_slots = charge_slots
         self.discharge_slots = discharge_slots
         self.mode = mode
+        self.engine = engine
         self.applied = applied
 
 
@@ -249,7 +251,11 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
 
         battery = self.battery_params()
 
-        plan = await self.hass.async_add_executor_job(solve, periods, battery)
+        from .milp_core import solve_best
+
+        plan, engine = await self.hass.async_add_executor_job(
+            solve_best, periods, battery, str(self._option("battery_engine"))
+        )
         charge_slots, discharge_slots = compile_slots(plan.periods, battery)
 
         applied: dict[str, Any] | None = None
@@ -262,4 +268,6 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             if not applied.get("success"):
                 _LOGGER.warning("Battery plan apply failed: %s", applied)
 
-        return BatteryPlanData(plan, charge_slots, discharge_slots, mode, applied)
+        return BatteryPlanData(
+            plan, charge_slots, discharge_slots, mode, engine, applied
+        )

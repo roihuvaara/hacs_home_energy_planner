@@ -16,7 +16,10 @@ from .solis_slots import SlotSpec, find_cross_side_overlaps
 
 PERIOD_MINUTES = 15
 PERIOD_HOURS = PERIOD_MINUTES / 60.0
-STATE_STEP_KWH = 0.1
+# 0.05 keeps the 12 A planned charge rate (0.15 kWh/quarter) exactly
+# representable; at 0.1 the int() truncation silently capped charging at
+# 0.1 kWh/quarter (~8 A), which the LP cross-check exposed.
+STATE_STEP_KWH = 0.05
 BATTERY_NOMINAL_VOLTAGE = 50.0
 ROUND_TRIP_EFFICIENCY = 0.9
 CHARGE_EFF = ROUND_TRIP_EFFICIENCY**0.5
@@ -112,8 +115,10 @@ def solve(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
         min(battery.planned_charge_current, battery.max_charge_current)
     )
     discharge_step = current_to_period_kwh(battery.max_discharge_current)
-    charge_units = int(charge_step / STATE_STEP_KWH)
-    discharge_units = int(discharge_step / STATE_STEP_KWH)
+    # round, not truncate: 0.15/0.05 is 2.999... in floats and int()
+    # would silently drop a third of the charge rate
+    charge_units = max(1, int(round(charge_step / STATE_STEP_KWH)))
+    discharge_units = max(1, int(round(discharge_step / STATE_STEP_KWH)))
 
     n = len(periods)
     inf = float("inf")

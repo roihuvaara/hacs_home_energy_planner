@@ -12,7 +12,7 @@
   "documentation": "https://github.com/roihuvaara/hacs_home_energy_planner",
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/roihuvaara/hacs_home_energy_planner/issues",
-  "requirements": [],
-  "version": "0.6.1",
+  "requirements": ["highspy>=1.10"],
+  "version": "0.7.0",
   "homeassistant": "2025.1.0"
 }
