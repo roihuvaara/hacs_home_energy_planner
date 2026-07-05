@@ -80,25 +80,45 @@ def _entity_id(prefix: str, side: str, slot: int, field: str) -> str:
     return f"number.{prefix}_slot{slot}_{side}_{field}"
 
 
+class SlotTableUnavailable(Exception):
+    """A slot entity is unreadable; the table cannot be trusted for diffing."""
+
+
+def _slot_value(state, entity_id: str) -> str:
+    if state is None or state.state in ("unavailable", "unknown", ""):
+        raise SlotTableUnavailable(f"{entity_id} is unavailable")
+    return str(state.state)
+
+
 def read_slot_table(hass: HomeAssistant, prefix: str, side: str) -> list[SlotSpec]:
+    """Read the inverter's current table.
+
+    Raises SlotTableUnavailable when any entity is unreadable — diffing
+    against a half-known table is how tables get corrupted, so callers
+    abort the apply and retry on the next tick.
+    """
     table: list[SlotSpec] = []
     for slot in range(1, SLOT_COUNT + 1):
-        time_state = hass.states.get(_entity_id(prefix, side, slot, "time"))
-        current_state = hass.states.get(_entity_id(prefix, side, slot, "current"))
-        soc_state = hass.states.get(_entity_id(prefix, side, slot, "soc"))
-        enabled_state = hass.states.get(_entity_id(prefix, side, slot, "enabled"))
-        table.append(
-            SlotSpec(
-                time=str(time_state.state) if time_state else "00:00-00:00",
-                enabled=(
-                    str(enabled_state.state).lower() == "on" if enabled_state else False
-                ),
-                current=(
-                    int(round(float(current_state.state))) if current_state else 0
-                ),
-                soc=int(round(float(soc_state.state))) if soc_state else 19,
+        time_id = _entity_id(prefix, side, slot, "time")
+        current_id = _entity_id(prefix, side, slot, "current")
+        soc_id = _entity_id(prefix, side, slot, "soc")
+        enabled_id = _entity_id(prefix, side, slot, "enabled")
+        try:
+            table.append(
+                SlotSpec(
+                    time=_slot_value(hass.states.get(time_id), time_id),
+                    enabled=_slot_value(hass.states.get(enabled_id), enabled_id).lower()
+                    == "on",
+                    current=int(
+                        round(float(_slot_value(hass.states.get(current_id), current_id)))
+                    ),
+                    soc=int(
+                        round(float(_slot_value(hass.states.get(soc_id), soc_id)))
+                    ),
+                )
             )
-        )
+        except ValueError as err:
+            raise SlotTableUnavailable(f"{side} slot {slot}: {err}") from err
     return table
 
 
@@ -197,8 +217,16 @@ async def apply_slots(
             "problems": problems,
         }
 
-    current_charge = read_slot_table(hass, prefix, "charge")
-    current_discharge = read_slot_table(hass, prefix, "discharge")
+    try:
+        current_charge = read_slot_table(hass, prefix, "charge")
+        current_discharge = read_slot_table(hass, prefix, "discharge")
+    except SlotTableUnavailable as err:
+        _LOGGER.warning("Solis apply skipped, table unreadable: %s", err)
+        return {
+            "success": False,
+            "error": "slot_table_unavailable",
+            "message": str(err),
+        }
     ops = diff_write_ops(
         current_charge=current_charge,
         current_discharge=current_discharge,
@@ -244,8 +272,12 @@ async def apply_slots(
             "retry_errors": retry_errors,
         }
 
-    actual_charge = read_slot_table(hass, prefix, "charge")
-    actual_discharge = read_slot_table(hass, prefix, "discharge")
+    try:
+        actual_charge = read_slot_table(hass, prefix, "charge")
+        actual_discharge = read_slot_table(hass, prefix, "discharge")
+    except SlotTableUnavailable:
+        # writes landed but readback is flapping; trust the delayed pass
+        actual_charge, actual_discharge = desired_charge, desired_discharge
     immediate_mismatches = diff_tables(
         desired_charge, actual_charge, "charge"
     ) + diff_tables(desired_discharge, actual_discharge, "discharge")
@@ -291,8 +323,12 @@ def _schedule_reverify(
                 "Skipping stale re-verify (generation %d superseded)", generation
             )
             return
-        actual_charge = read_slot_table(hass, prefix, "charge")
-        actual_discharge = read_slot_table(hass, prefix, "discharge")
+        try:
+            actual_charge = read_slot_table(hass, prefix, "charge")
+            actual_discharge = read_slot_table(hass, prefix, "discharge")
+        except SlotTableUnavailable as err:
+            _LOGGER.warning("Delayed re-verify skipped, table unreadable: %s", err)
+            return
         mismatches = diff_tables(desired_charge, actual_charge, "charge") + diff_tables(
             desired_discharge, actual_discharge, "discharge"
         )
@@ -320,8 +356,16 @@ def _schedule_reverify(
 
 async def read_slots(hass: HomeAssistant) -> dict[str, Any]:
     prefix = discover_slot_prefix(hass)
-    charge = read_slot_table(hass, prefix, "charge")
-    discharge = read_slot_table(hass, prefix, "discharge")
+    try:
+        charge = read_slot_table(hass, prefix, "charge")
+        discharge = read_slot_table(hass, prefix, "discharge")
+    except SlotTableUnavailable as err:
+        return {
+            "success": False,
+            "error": "slot_table_unavailable",
+            "message": str(err),
+            "prefix": prefix,
+        }
     return {
         "success": True,
         "prefix": prefix,

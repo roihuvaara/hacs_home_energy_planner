@@ -370,11 +370,14 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
 
         applied: dict[str, Any] | None = None
         if mode == MODE_CONTROL:
-            applied = await apply_slots(
-                self.hass,
-                charge_slots=[s.as_dict() for s in charge_slots],
-                discharge_slots=[s.as_dict() for s in discharge_slots],
-            )
+            try:
+                applied = await apply_slots(
+                    self.hass,
+                    charge_slots=[s.as_dict() for s in charge_slots],
+                    discharge_slots=[s.as_dict() for s in discharge_slots],
+                )
+            except Exception as err:  # noqa: BLE001 - plan survives apply failure
+                applied = {"success": False, "error": str(err)}
             if not applied.get("success"):
                 _LOGGER.warning("Battery plan apply failed: %s", applied)
 
