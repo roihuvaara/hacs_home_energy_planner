@@ -82,9 +82,18 @@ class ClimateConfig:
     cool_water_target_hot: float = 16.0  # allowed on genuinely hot days
     cool_hot_day_outdoor: float = 27.0
     dew_point_margin: float = 2.0
-    cool_room_above: float = 24.5  # switch to cooling when room is warm
-    cool_room_stop: float = 23.5  # back to heating mode below this
     test_day_outdoor_max: float = 25.0  # notify: good day to trial cooling
+    # thermal regime state machine (input routing: slow actuator, slow
+    # inputs — direction never reads instantaneous room temperature)
+    regime_dwell_hours: float = 12.0  # min time per regime; heat<->cool via neutral
+    regime_cool_mean_72h: float = 17.0  # COOL needs a genuinely warm stretch...
+    regime_cool_max_24h: float = 25.0  # ...with a hot day ahead
+    regime_room_mean_heat_below: float = 23.2  # backup net under the 23-23.5 band
+    # within COOL, when cooling actually runs: night block (cheap, high
+    # cooling COP in cool night air) or measured solar surplus
+    cool_night_start_hour: int = 21
+    cool_night_end_hour: int = 9
+    cool_surplus_export_w: float = 500.0
 
 
 @dataclass(frozen=True)
@@ -259,6 +268,76 @@ def lead_boost(
     if room_temp is None or not hold_active:
         return 0.0
     return 1.0 if room_temp < config.lead_room_below else 0.0
+
+
+REGIME_HEAT = "heat"
+REGIME_NEUTRAL = "neutral"
+REGIME_COOL = "cool"
+
+
+def decide_regime(
+    current: str | None,
+    hours_in_regime: float,
+    forecast_avg_12h: float | None,
+    forecast_mean_72h: float | None,
+    forecast_max_24h: float | None,
+    room_mean_24h: float | None,
+    config: ClimateConfig | None = None,
+) -> tuple[str, str]:
+    """Thermal regime for the Versati space circuit.
+
+    Deliberately takes no instantaneous room temperature: the slab is a
+    slow actuator, so direction is decided by forecasts (predictive) and
+    at most the 24 h room *mean* as a backup net. Heat<->cool reversals
+    always pass through NEUTRAL, and every regime holds for the dwell.
+    """
+    config = config or ClimateConfig()
+
+    # predictive heat demand: the weather-base table asks for more than
+    # its mildest band exactly when the 12 h forecast avg drops below
+    # the first band threshold — the already-tuned heating signal
+    heat_needed = (
+        forecast_avg_12h is not None
+        and forecast_avg_12h < config.base_bands[0][0]
+    ) or (
+        room_mean_24h is not None
+        and room_mean_24h < config.regime_room_mean_heat_below
+    )
+    cool_wanted = (
+        not heat_needed
+        and forecast_mean_72h is not None
+        and forecast_mean_72h >= config.regime_cool_mean_72h
+        and forecast_max_24h is not None
+        and forecast_max_24h >= config.regime_cool_max_24h
+    )
+    target = (
+        REGIME_HEAT if heat_needed else REGIME_COOL if cool_wanted else REGIME_NEUTRAL
+    )
+
+    if current is None:
+        return target, f"initial: {target}"
+    if target == current:
+        return current, f"stay {current}"
+    if hours_in_regime < config.regime_dwell_hours:
+        return (
+            current,
+            f"dwell: {hours_in_regime:.0f}h < {config.regime_dwell_hours:.0f}h",
+        )
+    if {current, target} == {REGIME_HEAT, REGIME_COOL}:
+        return REGIME_NEUTRAL, f"{current}->{target} passes through neutral"
+    return target, f"{current}->{target}"
+
+
+def cool_active_now(
+    local_hour: int, grid_export_w: float, config: ClimateConfig | None = None
+) -> bool:
+    """Within COOL regime: run in the night block or on measured surplus."""
+    config = config or ClimateConfig()
+    start, end = config.cool_night_start_hour, config.cool_night_end_hour
+    in_night = (local_hour >= start or local_hour < end) if start > end else (
+        start <= local_hour < end
+    )
+    return in_night or grid_export_w >= config.cool_surplus_export_w
 
 
 def dew_point_c(temp_c: float, rh_pct: float) -> float:

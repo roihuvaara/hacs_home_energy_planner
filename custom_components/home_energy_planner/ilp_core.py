@@ -53,6 +53,9 @@ class IlpInputs:
     outdoor_forecast_max_24h: float | None
     currently_cooling: bool
     currently_drying: bool
+    # slab (Versati) COOL regime active: the slow actuator does the bulk,
+    # so the ILP only trims peaks (threshold bumped)
+    slab_cooling: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,12 +94,13 @@ def compute_ilp_action(
 
     room = inputs.room_temp
     humidity = inputs.room_humidity
+    cool_above = config.cool_room_above + (0.5 if inputs.slab_cooling else 0.0)
     action = ACTION_OFF
     reason = "room unknown" if room is None else "comfortable"
     if room is not None:
         if room >= config.hard_room_max:
             action, reason = ACTION_COOL, "room above hard max"
-        elif room >= config.cool_room_above and (surplus or cheap):
+        elif room >= cool_above and (surplus or cheap):
             action, reason = (
                 ACTION_COOL,
                 "warm room on surplus" if surplus else "warm room in cheap half",

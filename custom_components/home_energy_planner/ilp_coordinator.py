@@ -188,6 +188,11 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         )
         grid_power = self._float_state("grid_power_entity") or 0.0
         room_temp = self._float_state("room_temp_entity")
+        bundle = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        slab_cooling = bool(
+            bundle
+            and getattr(bundle.get("climate"), "regime", None) == "cool"
+        )
         inputs = IlpInputs(
             room_temp=room_temp,
             room_humidity=self._float_state("room_humidity_entity"),
@@ -196,6 +201,7 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
             outdoor_forecast_max_24h=await self._forecast_max_temp_24h(),
             currently_cooling=self._effective_action == ACTION_COOL,
             currently_drying=self._effective_action == ACTION_DRY,
+            slab_cooling=slab_cooling,
         )
         result = compute_ilp_action(inputs, self._config)
         effective = self._apply_dwell(result.action, dt_util.now())

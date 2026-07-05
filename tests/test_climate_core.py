@@ -221,3 +221,83 @@ def test_cool_water_target_guarded():
     # unknown humidity: fall back to the configured target only
     target, dew = cool_water_target(23.0, None, 28.0, CONFIG)
     assert target == 16.0 and dew is None
+
+
+# --- thermal regime state machine --------------------------------------------
+
+
+def test_regime_signature_has_no_instantaneous_room_temp():
+    import inspect
+
+    from home_energy_planner.climate_core import decide_regime
+
+    params = list(inspect.signature(decide_regime).parameters)
+    assert "room_temp" not in params
+    assert "room_mean_24h" in params  # only the slow signal
+
+
+def test_regime_heat_is_forecast_predictive():
+    from home_energy_planner.climate_core import decide_regime
+
+    # 12h forecast avg below the mildest base band -> heat, room mean fine
+    regime, _ = decide_regime("neutral", 24.0, 10.0, 12.0, 15.0, 23.8, CONFIG)
+    assert regime == "heat"
+    # mild forecast, warm room mean -> no heat
+    regime, _ = decide_regime("neutral", 24.0, 16.0, 15.0, 20.0, 23.8, CONFIG)
+    assert regime == "neutral"
+
+
+def test_regime_room_mean_backup_forces_heat():
+    from home_energy_planner.climate_core import decide_regime
+
+    regime, _ = decide_regime("neutral", 24.0, 16.0, 18.0, 26.0, 22.9, CONFIG)
+    assert regime == "heat"
+
+
+def test_regime_cool_needs_warm_stretch_and_hot_day():
+    from home_energy_planner.climate_core import decide_regime
+
+    regime, _ = decide_regime("neutral", 24.0, 18.0, 18.0, 26.0, 23.8, CONFIG)
+    assert regime == "cool"
+    # warm stretch but no hot day
+    regime, _ = decide_regime("neutral", 24.0, 18.0, 18.0, 23.0, 23.8, CONFIG)
+    assert regime == "neutral"
+    # hot day but cold stretch
+    regime, _ = decide_regime("neutral", 24.0, 18.0, 15.0, 26.0, 23.8, CONFIG)
+    assert regime == "neutral"
+
+
+def test_regime_dwell_blocks_changes():
+    from home_energy_planner.climate_core import decide_regime
+
+    regime, reason = decide_regime("neutral", 6.0, 18.0, 18.0, 26.0, 23.8, CONFIG)
+    assert regime == "neutral" and "dwell" in reason
+    regime, _ = decide_regime("neutral", 13.0, 18.0, 18.0, 26.0, 23.8, CONFIG)
+    assert regime == "cool"
+
+
+def test_regime_direction_reversal_passes_through_neutral():
+    from home_energy_planner.climate_core import decide_regime
+
+    regime, reason = decide_regime("heat", 24.0, 18.0, 18.0, 26.0, 23.8, CONFIG)
+    assert regime == "neutral" and "neutral" in reason
+    regime, _ = decide_regime("cool", 24.0, 10.0, 12.0, 15.0, 23.8, CONFIG)
+    assert regime == "neutral"
+
+
+def test_regime_overcool_exits_via_room_mean():
+    from home_energy_planner.climate_core import decide_regime
+
+    # in cool, room mean under the backup net -> heat wanted -> neutral first
+    regime, _ = decide_regime("cool", 24.0, 18.0, 18.0, 26.0, 23.0, CONFIG)
+    assert regime == "neutral"
+
+
+def test_cool_active_night_block_and_surplus():
+    from home_energy_planner.climate_core import cool_active_now
+
+    assert cool_active_now(23, 0.0, CONFIG)  # night
+    assert cool_active_now(3, 0.0, CONFIG)  # night wraps past midnight
+    assert not cool_active_now(14, 0.0, CONFIG)  # afternoon, no surplus
+    assert cool_active_now(14, 900.0, CONFIG)  # afternoon on solar surplus
+    assert not cool_active_now(9, 0.0, CONFIG)  # block ends at 09

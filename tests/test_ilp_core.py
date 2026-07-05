@@ -110,3 +110,17 @@ def test_dry_run_finishes_to_stop_threshold():
 def test_unknown_humidity_never_dries():
     result = compute_ilp_action(make_inputs(room_humidity=None, grid_export_w=2000.0))
     assert result.action == "off"
+
+
+def test_slab_cooling_raises_ilp_threshold():
+    # 24.8 normally cools on surplus; with the slab regime active the
+    # bumped threshold (25.0) keeps the ILP out of the slab's way
+    normal = compute_ilp_action(make_inputs(room_temp=24.8, grid_export_w=900.0))
+    assert normal.action == "cool"
+    deferred = compute_ilp_action(
+        make_inputs(room_temp=24.8, grid_export_w=900.0, slab_cooling=True)
+    )
+    assert deferred.action == "off"
+    # the hard max still overrides regardless of the slab
+    hard = compute_ilp_action(make_inputs(room_temp=25.6, slab_cooling=True))
+    assert hard.action == "cool"
