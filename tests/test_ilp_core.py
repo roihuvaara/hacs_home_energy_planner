@@ -13,7 +13,7 @@ from home_energy_planner.ilp_core import (  # noqa: E402
 def make_inputs(**overrides):
     defaults = dict(
         room_temp=23.0,
-        room_humidity=50.0,
+        room_humidity=45.0,
         grid_export_w=0.0,
         future_all_in=[12.0] * 96,
         outdoor_forecast_max_24h=20.0,
