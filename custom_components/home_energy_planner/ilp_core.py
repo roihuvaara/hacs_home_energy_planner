@@ -1,10 +1,11 @@
-"""Pure ILP (air-to-air heat pump) cooling recommendation.
+"""Pure ILP (air-to-air heat pump) comfort-band recommendation.
 
-Summer v1 of the ILP asset: hold the living-room comfort band by
-cooling when the room is warm and energy is effectively free or cheap —
-measured grid export first, cheap-half-of-horizon second — and pre-cool
-ahead of hot afternoons on surplus. Winter heating assistance joins the
-joint optimizer once the COP curve is identified (see research doc);
+Hold the living-room comfort band from both sides when energy is
+effectively free or cheap — measured grid export first,
+cheap-half-of-horizon second: cool when warm (pre-cool ahead of hot
+afternoons on surplus), heat-assist when the room sags under the band
+(the slab does the bulk; this trims). Full winter heating dispatch joins
+the joint optimizer once the COP curve is identified (see research doc);
 this module is also the actuator for those identification experiments.
 
 Comfort thresholds sit just above the climate module's warm-correction
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 
 ACTION_COOL = "cool"
 ACTION_DRY = "dry"
+ACTION_HEAT = "heat"
 ACTION_OFF = "off"
 
 
@@ -45,6 +47,13 @@ class IlpConfig:
     # dry mode also cools: never dry a room already at/below the bottom of
     # the 23-23.5 comfort band, not even past the hard humidity limit
     dry_room_floor: float = 23.0
+    # heating assist: trim the bottom of the comfort band when energy is
+    # cheap/free; the slab does the bulk. Thresholds anchored to the
+    # owner band (23-23.5) and protect_below_room lineage (22.8).
+    heat_room_min: float = 22.0  # heat at any price below this (comfort net)
+    heat_room_below: float = 22.8  # heat when cool AND energy cheap/free
+    heat_room_stop: float = 23.3  # keep heating until back here
+    heat_target_temp: float = 23.5
 
 
 @dataclass(frozen=True)
@@ -56,6 +65,7 @@ class IlpInputs:
     outdoor_forecast_max_24h: float | None
     currently_cooling: bool
     currently_drying: bool
+    currently_heating: bool = False
     # slab (Versati) COOL regime active: the slow actuator does the bulk,
     # so the ILP only trims peaks (threshold bumped)
     slab_cooling: bool = False
@@ -113,6 +123,19 @@ def compute_ilp_action(
         elif inputs.currently_cooling and room > config.cool_room_stop:
             action, reason = ACTION_COOL, "finishing cooling run"
 
+    # heat assist: only when the slab is not in its cooling regime (the
+    # two must never fight), and before dry — a cold room heats, not dries
+    if action == ACTION_OFF and room is not None and not inputs.slab_cooling:
+        if room <= config.heat_room_min:
+            action, reason = ACTION_HEAT, "room below hard min"
+        elif room <= config.heat_room_below and (surplus or cheap):
+            action, reason = (
+                ACTION_HEAT,
+                "cool room on surplus" if surplus else "cool room in cheap half",
+            )
+        elif inputs.currently_heating and room < config.heat_room_stop:
+            action, reason = ACTION_HEAT, "finishing heat run"
+
     if action == ACTION_OFF and humidity is not None:
         dry_allowed = room is not None and room >= config.dry_room_floor
         if not dry_allowed:
@@ -130,7 +153,9 @@ def compute_ilp_action(
 
     return IlpResult(
         action=action,
-        target_temp=config.cool_target_temp,
+        target_temp=config.heat_target_temp
+        if action == ACTION_HEAT
+        else config.cool_target_temp,
         reason=reason,
         actual_surplus=surplus,
         price_delta=round(delta, 3),

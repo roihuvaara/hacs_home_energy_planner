@@ -244,6 +244,7 @@ class ClimateTargetSensor(CoordinatorEntity[ClimateCoordinator], SensorEntity):
                 else None
             ),
             "manual_override_count": self.coordinator._override.count,
+            "learned": self._learned_attrs(),
             "cooling": data.cooling,
             "legacy_target": data.legacy_target,
             "matches_legacy": (
@@ -251,6 +252,16 @@ class ClimateTargetSensor(CoordinatorEntity[ClimateCoordinator], SensorEntity):
                 and abs(result.target - data.legacy_target) < 0.05
             ),
             "last_apply": data.applied,
+        }
+
+    def _learned_attrs(self) -> dict[str, Any]:
+        preferences = getattr(self.coordinator, "preferences", None)
+        if preferences is None:
+            return {}
+        summary = preferences.summary()
+        return {
+            "target_offset": summary["adjustments"].get("climate_target_offset", 0.0),
+            "event_counts": summary["event_counts"],
         }
 
 
@@ -408,5 +419,20 @@ class IlpRecommendationSensor(CoordinatorEntity[IlpCoordinator], SensorEntity):
                 else None
             ),
             "manual_override_count": self.coordinator._override.count,
+            "learned": self._learned_attrs(),
             "last_apply": data.applied,
+        }
+
+    def _learned_attrs(self) -> dict[str, Any]:
+        preferences = getattr(self.coordinator, "preferences", None)
+        if preferences is None:
+            return {}
+        summary = preferences.summary()
+        adjustments = summary["adjustments"]
+        return {
+            "cool_room_above": adjustments.get("ilp_cool_room_above", 0.0),
+            "dry_humidity_above": adjustments.get("ilp_dry_humidity_above", 0.0),
+            "dry_room_floor": adjustments.get("ilp_dry_room_floor", 0.0),
+            "heat_room_below": adjustments.get("ilp_heat_room_below", 0.0),
+            "event_counts": summary["event_counts"],
         }

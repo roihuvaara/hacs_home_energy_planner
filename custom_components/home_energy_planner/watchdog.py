@@ -241,6 +241,19 @@ class PlannerWatchdog:
                 bundle["pricing"], bundle["battery"], {"days": 30}
             )
             totals = report["totals"]
+            preference_line = ""
+            preferences = bundle.get("preferences")
+            if preferences is not None:
+                summary = preferences.summary()
+                active = {
+                    key: value
+                    for key, value in summary["adjustments"].items()
+                    if value
+                }
+                preference_line = (
+                    f" Overrides: {summary['event_counts'] or 'none'};"
+                    f" learned: {active or 'no drift'}."
+                )
             await self._notify(
                 "Energy planner monthly report",
                 f"Last 30 days: baseline {totals['baseline_cents'] / 100:.2f} e, "
@@ -248,7 +261,7 @@ class PlannerWatchdog:
                 f"(savings ceiling {totals['planned_savings_cents'] / 100:.2f} e, "
                 f"{totals['planned_savings_pct']}%), actual "
                 f"{(totals['actual_cents'] or 0) / 100:.2f} e over "
-                f"{totals['days_evaluated']} days.",
+                f"{totals['days_evaluated']} days." + preference_line,
                 "hep_monthly_report",
             )
         except Exception as err:  # noqa: BLE001 - report is best-effort

@@ -77,6 +77,7 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         hass: HomeAssistant,
         entry: ConfigEntry,
         pricing: PricingCoordinator,
+        preferences=None,
     ) -> None:
         super().__init__(
             hass, _LOGGER, name=f"{DOMAIN} water_heater", update_interval=None
@@ -84,6 +85,7 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         self._entry = entry
         self._pricing = pricing
         self._config = WaterHeaterConfig()
+        self._preferences = preferences
         self._effective_mode: str | None = None
         self._mode_since: datetime | None = None
         from .manual_override import ManualOverrideTracker
@@ -230,9 +232,24 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
             current_value = None
         if current_value is not None and current_value == target:
             return {"success": True, "written": False, "target": target}
+        provenance_known = self._override.last_written is not None
+        count_before = self._override.count
         if self._override.suppressed(
             current_value, target, dt_util.now(), self._override_hold()
         ):
+            # log-only in v1: tank-target overrides carry no unambiguous
+            # threshold mapping, but the events feed the monthly report
+            if (
+                self._preferences is not None
+                and provenance_known
+                and self._override.count > count_before
+            ):
+                self._preferences.record(
+                    "water_heater",
+                    target,
+                    current_value,
+                    {"mode": self._effective_mode},
+                )
             return {
                 "success": True,
                 "written": False,

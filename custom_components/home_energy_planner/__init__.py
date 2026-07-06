@@ -19,25 +19,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .battery_coordinator import MODE_OFF, BatteryCoordinator
     from .climate_coordinator import ClimateCoordinator
     from .ilp_coordinator import IlpCoordinator
+    from .preference_store import PreferenceStore
     from .water_heater_coordinator import WaterHeaterCoordinator
+
+    preferences = PreferenceStore(hass, entry.entry_id)
+    await preferences.async_load()
 
     battery = BatteryCoordinator(hass, entry, coordinator)
     if battery.mode != MODE_OFF:
         await battery.async_refresh()
         battery.async_schedule_ticks()
 
-    climate = ClimateCoordinator(hass, entry, coordinator)
+    climate = ClimateCoordinator(hass, entry, coordinator, preferences)
     if climate.mode != MODE_OFF:
         await climate.async_restore_regime()
         await climate.async_refresh()
         climate.async_schedule_ticks()
 
-    water_heater = WaterHeaterCoordinator(hass, entry, coordinator)
+    water_heater = WaterHeaterCoordinator(hass, entry, coordinator, preferences)
     if water_heater.mode != MODE_OFF:
         await water_heater.async_refresh()
         water_heater.async_schedule_ticks()
 
-    ilp = IlpCoordinator(hass, entry, coordinator)
+    ilp = IlpCoordinator(hass, entry, coordinator, preferences)
     if ilp.mode != MODE_OFF:
         await ilp.async_refresh()
         ilp.async_schedule_ticks()
@@ -53,6 +57,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "water_heater": water_heater,
         "ilp": ilp,
         "watchdog": watchdog,
+        "preferences": preferences,
     }
 
     from homeassistant.helpers.event import async_track_time_change

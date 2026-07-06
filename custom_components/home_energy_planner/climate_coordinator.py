@@ -86,11 +86,14 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         hass: HomeAssistant,
         entry: ConfigEntry,
         pricing: PricingCoordinator,
+        preferences=None,
     ) -> None:
         super().__init__(hass, _LOGGER, name=f"{DOMAIN} climate", update_interval=None)
         self._entry = entry
         self._pricing = pricing
         self._config = ClimateConfig()
+        self._preferences = preferences
+        self._tick_context: dict[str, Any] = {}
         self._lead_hold_until: datetime | None = None
         self._last_write: tuple[float, datetime] | None = None
         self._trial_until: datetime | None = None
@@ -112,6 +115,10 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
     @property
     def regime(self) -> str | None:
         return self._regime
+
+    @property
+    def preferences(self):
+        return self._preferences
 
     def _regime_store_data(self) -> dict[str, Any]:
         return {
@@ -366,6 +373,24 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             lead_hold_active=self._lead_hold_until is not None,
         )
         result = compute_climate_target(inputs, self._config)
+        pref_offset = (
+            self._preferences.adjustment("climate_target_offset")
+            if self._preferences is not None
+            else 0.0
+        )
+        if pref_offset:
+            from dataclasses import replace
+
+            result = replace(
+                result,
+                target=round(
+                    min(
+                        self._config.max_target,
+                        max(self._config.min_target, result.target + pref_offset),
+                    ),
+                    1,
+                ),
+            )
 
         # thermal regime: slow inputs only (forecasts + 24 h room mean)
         from .climate_core import (
@@ -447,6 +472,12 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
                 "then set versati_cooling: control to let the planner run it.",
             )
 
+        self._tick_context = {
+            "room_temp": inputs.room_temp,
+            "regime": self._regime,
+            "price_position": result.price.position,
+        }
+
         applied: dict[str, Any] | None = None
         if mode == MODE_CONTROL and self._trial_until is None:
             if cooling_mode == "off" or self._regime in (None, REGIME_HEAT):
@@ -480,9 +511,19 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         hvac = state.state if state else None
         if hvac == desired or hvac is None:
             return None
+        provenance_known = self._hvac_override.last_written is not None
+        count_before = self._hvac_override.count
         if self._hvac_override.suppressed(
             hvac, desired, dt_util.now(), self._override_hold()
         ):
+            if (
+                self._preferences is not None
+                and provenance_known
+                and self._hvac_override.count > count_before
+            ):
+                self._preferences.record(
+                    "climate_hvac", desired, hvac, dict(self._tick_context)
+                )
             return {
                 "success": True,
                 "hvac": hvac,
@@ -552,9 +593,19 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         if unchanged:
             return {"success": True, "written": False, "target": target}
         now_check = dt_util.now()
+        provenance_known = self._override.last_written is not None
+        count_before = self._override.count
         if self._override.suppressed(
             current_value, target, now_check, self._override_hold()
         ):
+            if (
+                self._preferences is not None
+                and provenance_known
+                and self._override.count > count_before
+            ):
+                self._preferences.record(
+                    "climate", target, current_value, dict(self._tick_context)
+                )
             return {
                 "success": True,
                 "written": False,

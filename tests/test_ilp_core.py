@@ -69,7 +69,7 @@ def test_running_cooldown_finishes_to_stop_threshold():
 
 
 def test_comfortable_room_stays_off():
-    result = compute_ilp_action(make_inputs(room_temp=22.5, grid_export_w=2000.0))
+    result = compute_ilp_action(make_inputs(room_temp=23.1, grid_export_w=2000.0))
     assert result.action == "off"
     unknown = compute_ilp_action(make_inputs(room_temp=None, grid_export_w=2000.0))
     assert unknown.action == "off"
@@ -113,28 +113,84 @@ def test_unknown_humidity_never_dries():
 
 
 def test_dry_never_runs_below_room_floor():
-    # the 2026-07-06 failure: 22.5 C room, RH ~53, cheap half -> dry cooled
-    # an already-cold room; comfort wins
-    cold_cheap = compute_ilp_action(
+    # 22.9: below the dry floor (23.0) but above heat entry (22.8) —
+    # isolates the floor from the heat ladder
+    cool_cheap = compute_ilp_action(
+        make_inputs(
+            room_temp=22.9,
+            room_humidity=53.0,
+            future_all_in=[10.0] + [14.0] * 95,
+        )
+    )
+    assert cool_cheap.action == "off"
+    assert "below dry floor" in cool_cheap.reason
+    # even past the hard humidity limit (owner decision: no bypass)
+    cool_humid = compute_ilp_action(
+        make_inputs(room_temp=22.9, room_humidity=60.0, future_all_in=[20.0] + [10.0] * 95)
+    )
+    assert cool_humid.action == "off"
+    # a running dry stops when the room falls through the floor
+    running = compute_ilp_action(
+        make_inputs(
+            room_temp=22.9,
+            room_humidity=47.0,
+            currently_drying=True,
+            future_all_in=[20.0] + [10.0] * 95,
+        )
+    )
+    assert running.action == "off"
+    # unknown room temperature is conservative: no dry
+    unknown = compute_ilp_action(make_inputs(room_temp=None, room_humidity=60.0))
+    assert unknown.action == "off"
+
+
+def test_cold_room_heats_instead_of_dry():
+    # the full 2026-07-06 morning: 22.5 C, humid, cheap -> the right
+    # answer is heat, never dry
+    result = compute_ilp_action(
         make_inputs(
             room_temp=22.5,
             room_humidity=53.0,
             future_all_in=[10.0] + [14.0] * 95,
         )
     )
-    assert cold_cheap.action == "off"
-    assert "below dry floor" in cold_cheap.reason
-    # even past the hard humidity limit (owner decision: no bypass)
-    cold_humid = compute_ilp_action(make_inputs(room_temp=22.5, room_humidity=60.0))
-    assert cold_humid.action == "off"
-    # a running dry stops when the room falls through the floor
-    running = compute_ilp_action(
-        make_inputs(room_temp=22.8, room_humidity=47.0, currently_drying=True)
+    assert result.action == "heat"
+    assert result.target_temp == 23.5
+
+
+def test_heat_assist_ladder():
+    # hard comfort net: heat at any price
+    expensive = [30.0] + [10.0] * 95
+    hard = compute_ilp_action(make_inputs(room_temp=21.8, future_all_in=expensive))
+    assert hard.action == "heat"
+    assert "hard min" in hard.reason
+    # assist band needs cheap or surplus
+    cheap = compute_ilp_action(
+        make_inputs(room_temp=22.6, future_all_in=[10.0] + [14.0] * 95)
     )
-    assert running.action == "off"
-    # unknown room temperature is conservative: no dry
-    unknown = compute_ilp_action(make_inputs(room_temp=None, room_humidity=60.0))
-    assert unknown.action == "off"
+    assert cheap.action == "heat"
+    surplus = compute_ilp_action(
+        make_inputs(room_temp=22.6, grid_export_w=900.0, future_all_in=expensive)
+    )
+    assert surplus.action == "heat"
+    pricey = compute_ilp_action(make_inputs(room_temp=22.6, future_all_in=expensive))
+    assert pricey.action == "off"
+    # finishing: keep heating up to the stop line, then off
+    running = compute_ilp_action(
+        make_inputs(room_temp=23.1, currently_heating=True, future_all_in=expensive)
+    )
+    assert running.action == "heat"
+    done = compute_ilp_action(
+        make_inputs(room_temp=23.4, currently_heating=True, future_all_in=expensive)
+    )
+    assert done.action == "off"
+
+
+def test_heat_assist_never_fights_slab_cooling():
+    result = compute_ilp_action(
+        make_inputs(room_temp=22.5, slab_cooling=True, future_all_in=[10.0] + [14.0] * 95)
+    )
+    assert result.action == "off"
 
 
 def test_slab_cooling_raises_ilp_threshold():

@@ -29,6 +29,7 @@ from .coordinator import PricingCoordinator
 from .ilp_core import (
     ACTION_COOL,
     ACTION_DRY,
+    ACTION_HEAT,
     IlpConfig,
     IlpInputs,
     IlpResult,
@@ -76,16 +77,49 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         hass: HomeAssistant,
         entry: ConfigEntry,
         pricing: PricingCoordinator,
+        preferences=None,
     ) -> None:
         super().__init__(hass, _LOGGER, name=f"{DOMAIN} ilp", update_interval=None)
         self._entry = entry
         self._pricing = pricing
         self._config = IlpConfig()
+        self._preferences = preferences
         self._effective_action: str | None = None
         self._action_since: datetime | None = None
+        self._tick_context: dict[str, Any] = {}
         from .manual_override import ManualOverrideTracker
 
         self._override = ManualOverrideTracker()
+
+    @property
+    def preferences(self):
+        return self._preferences
+
+    def _learned_config(self) -> IlpConfig:
+        """Base config plus the bounded offsets learned from overrides."""
+        if self._preferences is None:
+            return self._config
+        adj = self._preferences.adjustments
+        keys = (
+            "ilp_cool_room_above",
+            "ilp_dry_humidity_above",
+            "ilp_dry_room_floor",
+            "ilp_heat_room_below",
+        )
+        if not any(adj.get(key) for key in keys):
+            return self._config
+        from dataclasses import replace
+
+        base = self._config
+        return replace(
+            base,
+            cool_room_above=base.cool_room_above + adj.get("ilp_cool_room_above", 0.0),
+            dry_humidity_above=base.dry_humidity_above
+            + adj.get("ilp_dry_humidity_above", 0.0),
+            dry_room_floor=base.dry_room_floor + adj.get("ilp_dry_room_floor", 0.0),
+            heat_room_below=base.heat_room_below
+            + adj.get("ilp_heat_room_below", 0.0),
+        )
 
     def _override_hold(self) -> timedelta:
         return timedelta(
@@ -201,10 +235,18 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
             outdoor_forecast_max_24h=await self._forecast_max_temp_24h(),
             currently_cooling=self._effective_action == ACTION_COOL,
             currently_drying=self._effective_action == ACTION_DRY,
+            currently_heating=self._effective_action == ACTION_HEAT,
             slab_cooling=slab_cooling,
         )
-        result = compute_ilp_action(inputs, self._config)
+        result = compute_ilp_action(inputs, self._learned_config())
         effective = self._apply_dwell(result.action, dt_util.now())
+        self._tick_context = {
+            "room_temp": room_temp,
+            "room_humidity": inputs.room_humidity,
+            "price_delta": result.price_delta,
+            "surplus": result.actual_surplus,
+            "planner_action": effective,
+        }
 
         applied: dict[str, Any] | None = None
         if mode == MODE_CONTROL:
@@ -223,15 +265,27 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         entity_id = str(self._option("ilp_climate_entity"))
         state = self.hass.states.get(entity_id)
         current_mode = state.state if state else None
-        desired_mode = action if action in (ACTION_COOL, ACTION_DRY) else "off"
-        if current_mode == desired_mode and action != ACTION_COOL:
+        desired_mode = (
+            action if action in (ACTION_COOL, ACTION_DRY, ACTION_HEAT) else "off"
+        )
+        if current_mode == desired_mode and action not in (ACTION_COOL, ACTION_HEAT):
             return {"success": True, "action": action, "written": False}
-        # a mode we didn't write (heat, or a manually chosen cool/dry) is a
-        # human choice: respected for the hold window, then the plan takes
-        # over again; every detection is counted as preference-learning input
+        # a mode we didn't write is a human choice: respected for the hold
+        # window, then the plan takes over again; fresh detections with
+        # known provenance feed the preference log
+        provenance_known = self._override.last_written is not None
+        count_before = self._override.count
         if self._override.suppressed(
             current_mode, desired_mode, dt_util.now(), self._override_hold()
         ):
+            if (
+                self._preferences is not None
+                and provenance_known
+                and self._override.count > count_before
+            ):
+                self._preferences.record(
+                    "ilp", desired_mode, current_mode, dict(self._tick_context)
+                )
             return {
                 "success": True,
                 "action": action,
@@ -248,13 +302,15 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
                     {"entity_id": entity_id, "hvac_mode": desired_mode},
                     blocking=True,
                 )
-            if action == ACTION_COOL:
+            if action in (ACTION_COOL, ACTION_HEAT):
                 await self.hass.services.async_call(
                     "climate",
                     "set_temperature",
                     {
                         "entity_id": entity_id,
-                        "temperature": self._config.cool_target_temp,
+                        "temperature": self._config.heat_target_temp
+                        if action == ACTION_HEAT
+                        else self._config.cool_target_temp,
                     },
                     blocking=True,
                 )
