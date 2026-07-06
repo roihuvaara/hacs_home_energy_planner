@@ -252,6 +252,8 @@ class ClimateTargetSensor(CoordinatorEntity[ClimateCoordinator], SensorEntity):
                 and abs(result.target - data.legacy_target) < 0.05
             ),
             "last_apply": data.applied,
+            # aligned quarter-hour series for dashboard plotting
+            "projection": data.projection,
         }
 
     def _learned_attrs(self) -> dict[str, Any]:

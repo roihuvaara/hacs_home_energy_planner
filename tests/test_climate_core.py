@@ -315,3 +315,61 @@ def test_cool_active_night_block_and_surplus():
     assert not cool_active_now(14, 0.0, CONFIG)  # afternoon, no surplus
     assert cool_active_now(14, 900.0, CONFIG)  # afternoon on solar surplus
     assert not cool_active_now(9, 0.0, CONFIG)  # block ends at 09
+
+
+# --- projection ---------------------------------------------------------------
+
+
+def test_projection_quarter_zero_matches_live_target():
+    from home_energy_planner.climate_core import project_targets
+
+    inputs = make_inputs(
+        hourly_forecast=hours([5.0] * 48),
+        future_all_in=[12.0] * 60 + [6.0] * 36,
+    )
+    live = compute_climate_target(inputs, CONFIG)
+    projected = project_targets(inputs, CONFIG)
+    assert len(projected) == len(inputs.future_all_in)
+    assert projected[0] == live.target
+
+
+def test_projection_follows_price_shape_forward():
+    from home_energy_planner.climate_core import project_targets
+
+    # expensive first 24 quarters, cheap after: the projection should ask
+    # for more heat once the window it sees turns cheap-relative
+    prices = [15.0] * 24 + [5.0] * 72
+    inputs = make_inputs(
+        hourly_forecast=hours([5.0] * 48), future_all_in=prices
+    )
+    projected = project_targets(inputs, CONFIG)
+    assert projected[0] < projected[40]
+
+
+def test_projection_tracks_forecast_temperature():
+    from home_energy_planner.climate_core import project_targets
+
+    # mild now, cold from hour 12 on: later quarters land in a colder
+    # 12 h window and get a higher weather base
+    inputs = make_inputs(
+        hourly_forecast=hours([15.0] * 12 + [-5.0] * 36),
+        future_all_in=[12.0] * 96,
+    )
+    projected = project_targets(inputs, CONFIG)
+    assert projected[-1] > projected[0]
+
+
+def test_projection_includes_extra_offset():
+    from home_energy_planner.climate_core import project_targets
+
+    inputs = make_inputs(hourly_forecast=hours([5.0] * 48))
+    plain = project_targets(inputs, CONFIG)
+    shifted = project_targets(inputs, CONFIG, extra_offset=1.0)
+    assert shifted[0] == plain[0] + 1.0
+
+
+def test_projection_empty_price_horizon():
+    from home_energy_planner.climate_core import project_targets
+
+    inputs = make_inputs(future_all_in=[])
+    assert project_targets(inputs, CONFIG) == []

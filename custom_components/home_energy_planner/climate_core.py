@@ -379,6 +379,51 @@ def cool_water_target(
     return round(target, 1), dew
 
 
+def project_targets(
+    inputs: ClimateInputs,
+    config: ClimateConfig | None = None,
+    extra_offset: float = 0.0,
+) -> list[float]:
+    """Projected target per future quarter over the price horizon.
+
+    The forecast-driven layers (weather base, wind bump, cold dip) and
+    the price shape are recomputed at each future quarter from the same
+    inputs the live computation uses, just shifted forward. The
+    room-feedback layers (comfort, lead, warm, sun) react to a room
+    temperature that cannot be forecast, so they are held at their
+    current values: the projection matches the live target at quarter 0
+    and converges to the pure weather+price target as those corrections
+    age out of relevance further along the horizon.
+    """
+    config = config or ClimateConfig()
+    room = inputs.room_temp if inputs.room_temp is not None else config.room_fallback
+    comfort = comfort_correction(inputs.room_temp, config)
+    lead = lead_boost(inputs.room_temp, inputs.lead_hold_active, config)
+    warm = warm_correction(inputs.room_temp, config)
+    sun = sun_correction(
+        inputs.room_temp,
+        inputs.hourly_forecast[:2],
+        inputs.solar_current_hour_kwh,
+        inputs.solar_next_hour_kwh,
+        config,
+    )
+    held = comfort + lead - warm - sun + extra_offset
+    targets: list[float] = []
+    for quarter in range(len(inputs.future_all_in)):
+        hours = inputs.hourly_forecast[quarter // 4 :]
+        base, _bump = weather_base(hours, inputs.fallback_temp, config)
+        shape = price_shape(inputs.future_all_in[quarter:], config)
+        offset = shape.offset
+        protected = 0.0 if room < config.protect_below_room and offset < 0 else offset
+        cold_dip = cold_dip_boost(hours, inputs.fallback_temp, config)
+        target = min(
+            config.max_target,
+            max(config.min_target, base + protected + cold_dip + held),
+        )
+        targets.append(round(target, 1))
+    return targets
+
+
 def compute_climate_target(
     inputs: ClimateInputs, config: ClimateConfig | None = None
 ) -> ClimateResult:

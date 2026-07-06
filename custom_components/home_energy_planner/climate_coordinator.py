@@ -32,6 +32,7 @@ from .climate_core import (
     ClimateResult,
     ForecastHour,
     compute_climate_target,
+    project_targets,
 )
 from .const import DOMAIN
 from .coordinator import PricingCoordinator
@@ -70,6 +71,7 @@ class ClimateData:
         legacy_target: float | None,
         cooling: dict[str, Any],
         applied: dict[str, Any] | None,
+        projection: dict[str, Any] | None = None,
     ) -> None:
         self.result = result
         self.mode = mode
@@ -78,6 +80,7 @@ class ClimateData:
         self.legacy_target = legacy_target
         self.cooling = cooling
         self.applied = applied
+        self.projection = projection
 
 
 class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
@@ -392,6 +395,16 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
                 ),
             )
 
+        # projected target over the price horizon for dashboard plotting;
+        # includes the learned offset so quarter 0 matches the live target
+        projection: dict[str, Any] | None = None
+        if pricing and pricing.periods:
+            projection = {
+                "start": pricing.periods[0].start.isoformat(),
+                "period_minutes": 15,
+                "targets": project_targets(inputs, self._config, pref_offset),
+            }
+
         # thermal regime: slow inputs only (forecasts + 24 h room mean)
         from .climate_core import (
             REGIME_COOL,
@@ -501,6 +514,7 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             legacy_target=self._float_state("legacy_climate_target_entity"),
             cooling=cooling,
             applied=applied,
+            projection=projection,
         )
 
     async def _async_ensure_hvac(self, desired: str) -> dict[str, Any] | None:
