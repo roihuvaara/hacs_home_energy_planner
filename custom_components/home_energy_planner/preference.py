@@ -14,8 +14,8 @@ small, bounded threshold adjustments:
   can trim a threshold but never walk it somewhere absurd.
 
 Only mappings whose direction is unambiguous adjust anything; the rest
-(Versati hvac flips, water-heater targets) are logged for the monthly
-report and manual tuning.
+(Versati hvac flips) are logged for the monthly report and manual
+tuning.
 
 No Home Assistant imports; unit-testable standalone.
 """
@@ -38,6 +38,11 @@ CAPS = {
     "ilp_dry_humidity_above": 4.0,
     "ilp_dry_room_floor": 0.5,
     "ilp_heat_room_below": 0.5,
+    # tank target per weekday (0=Mon..6=Sun): repeated overrides on the
+    # same weekday reveal weekly rhythms (gym days, laundry, sauna-ish
+    # habits) without assuming which days they are. A dedicated sauna
+    # sensor is the planned better signal for event-driven pre-heating.
+    **{f"water_weekday_{day}": 6.0 for day in range(7)},
 }
 
 MODULE_CLIMATE = "climate"
@@ -139,6 +144,19 @@ def _climate_step(event: PreferenceEvent) -> dict[str, float]:
     return {"climate_target_offset": math.copysign(0.1, delta)}
 
 
+def _water_step(event: PreferenceEvent) -> dict[str, float]:
+    """Tank-target overrides learn per weekday: 1 C per event in the
+    override's direction, so e.g. repeatedly boosting on Fridays warms
+    Fridays only."""
+    try:
+        delta = float(event.manual_value) - float(event.planner_value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return {}
+    if abs(delta) <= VALUE_TOLERANCE:
+        return {}
+    return {f"water_weekday_{event.when.weekday()}": math.copysign(1.0, delta)}
+
+
 def _ilp_step(event: PreferenceEvent) -> dict[str, float]:
     planner = str(event.planner_value)
     manual = str(event.manual_value)
@@ -177,8 +195,10 @@ def derive_adjustments(
             steps = _climate_step(event)
         elif event.module == MODULE_ILP:
             steps = _ilp_step(event)
+        elif event.module == MODULE_WATER_HEATER:
+            steps = _water_step(event)
         else:
-            continue  # log-only modules
+            continue  # log-only modules (climate_hvac)
         weight = _weight(event, now)
         for key, step in steps.items():
             sums[key] += step * weight

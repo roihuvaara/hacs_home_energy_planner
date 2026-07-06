@@ -141,6 +141,30 @@ def test_ilp_cool_steps():
 
 def test_log_only_modules_do_not_adjust():
     hvac = event(module="climate_hvac", planner="off", manual="heat")
-    water = event(module="water_heater", planner=55.0, manual=66.0)
-    result = derive_adjustments([hvac, water], NOW)
+    result = derive_adjustments([hvac], NOW)
     assert all(value == 0.0 for value in result.values())
+
+
+def test_water_heater_overrides_learn_per_weekday():
+    # boosting the tank on one weekday warms only that weekday
+    boost = event(module="water_heater", planner=55, manual=66, when=NOW)
+    result = derive_adjustments([boost], NOW)
+    key = f"water_weekday_{NOW.weekday()}"
+    assert result[key] == 1.0
+    other_days = [
+        result[f"water_weekday_{day}"] for day in range(7) if day != NOW.weekday()
+    ]
+    assert all(value == 0.0 for value in other_days)
+    # lowering learns downward; repeated boosts cap at 6
+    lower = event(module="water_heater", planner=60, manual=51, when=NOW)
+    assert derive_adjustments([lower], NOW)[key] == -1.0
+    many = [
+        event(
+            module="water_heater",
+            planner=55,
+            manual=66,
+            when=NOW - timedelta(days=7 * i),
+        )
+        for i in range(12)
+    ]
+    assert derive_adjustments(many, NOW)[key] <= 6.0

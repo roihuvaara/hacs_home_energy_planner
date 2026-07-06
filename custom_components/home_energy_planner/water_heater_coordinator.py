@@ -92,6 +92,10 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
 
         self._override = ManualOverrideTracker()
 
+    @property
+    def preferences(self):
+        return self._preferences
+
     def _override_hold(self) -> timedelta:
         return timedelta(
             hours=float(
@@ -203,6 +207,14 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
 
         effective_mode = self._apply_dwell(result.mode, export_w, dt_util.now())
         effective_target = self._config.targets[effective_mode]
+        if self._preferences is not None:
+            # per-weekday offset learned from tank-target overrides
+            # (capped +-6 in preference.CAPS, so no further clamp needed)
+            weekday_offset = self._preferences.adjustment(
+                f"water_weekday_{dt_util.now().weekday()}"
+            )
+            if weekday_offset:
+                effective_target = int(round(effective_target + weekday_offset))
 
         applied: dict[str, Any] | None = None
         if mode == MODE_CONTROL:
@@ -237,8 +249,8 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         if self._override.suppressed(
             current_value, target, dt_util.now(), self._override_hold()
         ):
-            # log-only in v1: tank-target overrides carry no unambiguous
-            # threshold mapping, but the events feed the monthly report
+            # tank-target overrides learn a per-weekday offset (weekly
+            # rhythms: gym/laundry/sauna-ish days) via preference.py
             if (
                 self._preferences is not None
                 and provenance_known

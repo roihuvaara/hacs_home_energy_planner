@@ -315,7 +315,23 @@ class WaterHeaterModeSensor(CoordinatorEntity[WaterHeaterCoordinator], SensorEnt
                 data.legacy_mode is not None
                 and data.effective_mode == data.legacy_mode
             ),
+            "learned": self._learned_attrs(),
             "last_apply": data.applied,
+        }
+
+    def _learned_attrs(self) -> dict[str, Any]:
+        preferences = getattr(self.coordinator, "preferences", None)
+        if preferences is None:
+            return {}
+        summary = preferences.summary()
+        adjustments = summary["adjustments"]
+        weekdays = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+        return {
+            "target_offset_by_weekday": {
+                name: adjustments.get(f"water_weekday_{day}", 0.0)
+                for day, name in enumerate(weekdays)
+            },
+            "event_counts": summary["event_counts"],
         }
 
 
