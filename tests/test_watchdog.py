@@ -5,10 +5,13 @@ import sys
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "custom_components"))
 
+from types import SimpleNamespace  # noqa: E402
+
 from home_energy_planner.watchdog import (  # noqa: E402
     Debouncer,
     WatchdogSnapshot,
     evaluate_issues,
+    input_is_stale,
 )
 
 
@@ -48,6 +51,21 @@ def test_apply_and_engine_thresholds():
     assert keys(snap(battery_apply_failing_hours=2.5)) == ["battery_apply"]
     assert keys(snap(engine_fallback_hours=0.5)) == []
     assert keys(snap(engine_fallback_hours=1.5)) == ["engine_fallback"]
+
+
+def test_input_staleness_uses_last_reported():
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+    old = now - timedelta(hours=5)
+    # flat-but-alive: value unchanged for hours (last_updated stuck) while
+    # the integration keeps re-reporting it -> NOT stale
+    flat_alive = SimpleNamespace(
+        state="13.0", last_updated=old, last_reported=now - timedelta(minutes=5)
+    )
+    assert not input_is_stale(flat_alive, now)
+    dead = SimpleNamespace(state="18.0", last_updated=old, last_reported=old)
+    assert input_is_stale(dead, now)
+    assert input_is_stale(None, now)
+    assert input_is_stale(SimpleNamespace(state="unavailable"), now)
 
 
 def test_debouncer_once_per_day():

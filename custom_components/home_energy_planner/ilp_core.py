@@ -42,6 +42,9 @@ class IlpConfig:
     dry_humidity_above: float = 50.0  # dry when humid AND energy cheap/free
     dry_humidity_hard: float = 58.0  # dry at any price above this
     dry_humidity_stop: float = 44.0  # keep drying until back here
+    # dry mode also cools: never dry a room already at/below the bottom of
+    # the 23-23.5 comfort band, not even past the hard humidity limit
+    dry_room_floor: float = 23.0
 
 
 @dataclass(frozen=True)
@@ -111,7 +114,11 @@ def compute_ilp_action(
             action, reason = ACTION_COOL, "finishing cooling run"
 
     if action == ACTION_OFF and humidity is not None:
-        if humidity >= config.dry_humidity_hard:
+        dry_allowed = room is not None and room >= config.dry_room_floor
+        if not dry_allowed:
+            if room is not None and humidity >= config.dry_humidity_above:
+                reason = "humid but room below dry floor"
+        elif humidity >= config.dry_humidity_hard:
             action, reason = ACTION_DRY, "humidity above hard max"
         elif humidity >= config.dry_humidity_above and (surplus or cheap):
             action, reason = (

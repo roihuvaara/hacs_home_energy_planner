@@ -226,9 +226,9 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         desired_mode = action if action in (ACTION_COOL, ACTION_DRY) else "off"
         if current_mode == desired_mode and action != ACTION_COOL:
             return {"success": True, "action": action, "written": False}
-        # a mode we didn't set (dry, heat, manual cool) is a human choice:
-        # respected for the hold window, then the plan takes over again;
-        # every detection is counted as preference-learning input
+        # a mode we didn't write (heat, or a manually chosen cool/dry) is a
+        # human choice: respected for the hold window, then the plan takes
+        # over again; every detection is counted as preference-learning input
         if self._override.suppressed(
             current_mode, desired_mode, dt_util.now(), self._override_hold()
         ):

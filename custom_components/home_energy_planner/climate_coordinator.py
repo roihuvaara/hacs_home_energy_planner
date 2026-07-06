@@ -22,6 +22,7 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_change,
 )
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -98,6 +99,11 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         self._regime_since: datetime | None = None
         self._regime_reason: str = ""
         self._last_regime_eval: tuple | None = None
+        # regime survives restarts/reloads: a fresh initial pick inside a
+        # hysteresis band could silently flip HEAT->NEUTRAL (pump off)
+        self._regime_store: Store = Store(
+            hass, 1, f"{DOMAIN}.climate_regime_{entry.entry_id}"
+        )
         from .manual_override import ManualOverrideTracker
 
         self._override = ManualOverrideTracker()
@@ -106,6 +112,33 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
     @property
     def regime(self) -> str | None:
         return self._regime
+
+    def _regime_store_data(self) -> dict[str, Any]:
+        return {
+            "regime": self._regime,
+            "regime_since": self._regime_since.isoformat()
+            if self._regime_since
+            else None,
+            "reason": self._regime_reason,
+        }
+
+    async def async_restore_regime(self) -> None:
+        from .climate_core import REGIME_COOL, REGIME_HEAT, REGIME_NEUTRAL
+
+        try:
+            data = await self._regime_store.async_load()
+        except Exception as err:  # noqa: BLE001 - corrupt store: start fresh
+            _LOGGER.warning("Regime restore failed: %s", err)
+            return
+        if not data:
+            return
+        regime = data.get("regime")
+        if regime not in (REGIME_HEAT, REGIME_NEUTRAL, REGIME_COOL):
+            return
+        self._regime = regime
+        since = data.get("regime_since")
+        self._regime_since = dt_util.parse_datetime(since) if since else None
+        self._regime_reason = f"restored: {data.get('reason') or regime}"
 
     def _override_hold(self) -> timedelta:
         return timedelta(
@@ -354,29 +387,24 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             else None
         )
         eval_key = (now.date(), now.hour)
-        if self._regime is None or (
-            now.hour % 6 == 0 and self._last_regime_eval != eval_key
-        ):
+        if self._regime is None or self._last_regime_eval != eval_key:
             self._last_regime_eval = eval_key
-            hours_in = (
-                (now - self._regime_since).total_seconds() / 3600.0
-                if self._regime_since
-                else 1e9
-            )
             room_mean = await self._room_mean_24h()
             new_regime, reason = decide_regime(
                 self._regime,
-                hours_in,
                 forecast_avg_12h,
                 forecast_mean_72h,
                 forecast_max,
                 room_mean,
                 self._config,
             )
-            if new_regime != self._regime:
+            changed = new_regime != self._regime
+            if changed:
                 self._regime_since = now
             self._regime = new_regime
             self._regime_reason = reason
+            if changed:
+                self._regime_store.async_delay_save(self._regime_store_data, 10)
 
         water_target, dew = cool_water_target(
             inputs.room_temp, humidity, forecast_max, self._config

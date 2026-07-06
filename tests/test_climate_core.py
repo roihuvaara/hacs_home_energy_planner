@@ -234,63 +234,77 @@ def test_regime_signature_has_no_instantaneous_room_temp():
     params = list(inspect.signature(decide_regime).parameters)
     assert "room_temp" not in params
     assert "room_mean_24h" in params  # only the slow signal
+    assert "hours_in_regime" not in params  # transitions are free, no dwell
 
 
 def test_regime_heat_is_forecast_predictive():
     from home_energy_planner.climate_core import decide_regime
 
     # 12h forecast avg below the mildest base band -> heat, room mean fine
-    regime, _ = decide_regime("neutral", 24.0, 10.0, 12.0, 15.0, 23.8, CONFIG)
+    regime, _ = decide_regime("neutral", 10.0, 12.0, 15.0, 23.8, CONFIG)
     assert regime == "heat"
     # mild forecast, warm room mean -> no heat
-    regime, _ = decide_regime("neutral", 24.0, 16.0, 15.0, 20.0, 23.8, CONFIG)
+    regime, _ = decide_regime("neutral", 16.0, 15.0, 20.0, 23.8, CONFIG)
     assert regime == "neutral"
 
 
 def test_regime_room_mean_backup_forces_heat():
     from home_energy_planner.climate_core import decide_regime
 
-    regime, _ = decide_regime("neutral", 24.0, 16.0, 18.0, 26.0, 22.9, CONFIG)
+    regime, _ = decide_regime("neutral", 16.0, 18.0, 26.0, 22.9, CONFIG)
     assert regime == "heat"
 
 
 def test_regime_cool_needs_warm_stretch_and_hot_day():
     from home_energy_planner.climate_core import decide_regime
 
-    regime, _ = decide_regime("neutral", 24.0, 18.0, 18.0, 26.0, 23.8, CONFIG)
+    regime, _ = decide_regime("neutral", 18.0, 18.0, 26.0, 23.8, CONFIG)
     assert regime == "cool"
     # warm stretch but no hot day
-    regime, _ = decide_regime("neutral", 24.0, 18.0, 18.0, 23.0, 23.8, CONFIG)
+    regime, _ = decide_regime("neutral", 18.0, 18.0, 23.0, 23.8, CONFIG)
     assert regime == "neutral"
     # hot day but cold stretch
-    regime, _ = decide_regime("neutral", 24.0, 18.0, 15.0, 26.0, 23.8, CONFIG)
+    regime, _ = decide_regime("neutral", 18.0, 15.0, 26.0, 23.8, CONFIG)
     assert regime == "neutral"
 
 
-def test_regime_dwell_blocks_changes():
+def test_regime_transitions_are_free():
     from home_energy_planner.climate_core import decide_regime
 
-    regime, reason = decide_regime("neutral", 6.0, 18.0, 18.0, 26.0, 23.8, CONFIG)
-    assert regime == "neutral" and "dwell" in reason
-    regime, _ = decide_regime("neutral", 13.0, 18.0, 18.0, 26.0, 23.8, CONFIG)
+    # the 2026-07-06 failure shape: parked in neutral, forecast turns cold
+    # overnight -> heat immediately, nothing may hold the pump off
+    regime, _ = decide_regime("neutral", 13.0, 14.0, 15.0, 23.8, CONFIG)
+    assert regime == "heat"
+    # direct reversals allowed when conditions genuinely swing
+    regime, _ = decide_regime("heat", 18.0, 18.0, 26.0, 23.8, CONFIG)
     assert regime == "cool"
+    regime, _ = decide_regime("cool", 10.0, 12.0, 15.0, 23.8, CONFIG)
+    assert regime == "heat"
 
 
-def test_regime_direction_reversal_passes_through_neutral():
+def test_regime_heat_exit_hysteresis():
     from home_energy_planner.climate_core import decide_regime
 
-    regime, reason = decide_regime("heat", 24.0, 18.0, 18.0, 26.0, 23.8, CONFIG)
-    assert regime == "neutral" and "neutral" in reason
-    regime, _ = decide_regime("cool", 24.0, 10.0, 12.0, 15.0, 23.8, CONFIG)
-    assert regime == "neutral"
+    # inside the forecast margin band (14..15): heat holds, but neutral
+    # does not newly enter heat
+    assert decide_regime("heat", 14.5, 15.0, 20.0, 23.8, CONFIG)[0] == "heat"
+    assert decide_regime("neutral", 14.5, 15.0, 20.0, 23.8, CONFIG)[0] == "neutral"
+    # clear of the margin: heat releases
+    assert decide_regime("heat", 15.5, 15.0, 20.0, 23.8, CONFIG)[0] == "neutral"
+    # room-mean margin band (23.2..23.4) behaves the same way
+    assert decide_regime("heat", 16.0, 15.0, 20.0, 23.3, CONFIG)[0] == "heat"
+    assert decide_regime("neutral", 16.0, 15.0, 20.0, 23.3, CONFIG)[0] == "neutral"
 
 
-def test_regime_overcool_exits_via_room_mean():
+def test_regime_cool_exit_hysteresis_and_heat_override():
     from home_energy_planner.climate_core import decide_regime
 
-    # in cool, room mean under the backup net -> heat wanted -> neutral first
-    regime, _ = decide_regime("cool", 24.0, 18.0, 18.0, 26.0, 23.0, CONFIG)
-    assert regime == "neutral"
+    # cool holds inside its exit margins (mean 16.5 >= 16, max 24.5 >= 24)
+    assert decide_regime("cool", 18.0, 16.5, 24.5, 23.8, CONFIG)[0] == "cool"
+    # released once clearly below the margins
+    assert decide_regime("cool", 18.0, 15.5, 24.5, 23.8, CONFIG)[0] == "neutral"
+    # overcooled room mean under the backup net breaks cool immediately
+    assert decide_regime("cool", 18.0, 18.0, 26.0, 23.0, CONFIG)[0] == "heat"
 
 
 def test_cool_active_night_block_and_surplus():

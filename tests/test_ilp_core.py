@@ -112,6 +112,31 @@ def test_unknown_humidity_never_dries():
     assert result.action == "off"
 
 
+def test_dry_never_runs_below_room_floor():
+    # the 2026-07-06 failure: 22.5 C room, RH ~53, cheap half -> dry cooled
+    # an already-cold room; comfort wins
+    cold_cheap = compute_ilp_action(
+        make_inputs(
+            room_temp=22.5,
+            room_humidity=53.0,
+            future_all_in=[10.0] + [14.0] * 95,
+        )
+    )
+    assert cold_cheap.action == "off"
+    assert "below dry floor" in cold_cheap.reason
+    # even past the hard humidity limit (owner decision: no bypass)
+    cold_humid = compute_ilp_action(make_inputs(room_temp=22.5, room_humidity=60.0))
+    assert cold_humid.action == "off"
+    # a running dry stops when the room falls through the floor
+    running = compute_ilp_action(
+        make_inputs(room_temp=22.8, room_humidity=47.0, currently_drying=True)
+    )
+    assert running.action == "off"
+    # unknown room temperature is conservative: no dry
+    unknown = compute_ilp_action(make_inputs(room_temp=None, room_humidity=60.0))
+    assert unknown.action == "off"
+
+
 def test_slab_cooling_raises_ilp_threshold():
     # 24.8 normally cools on surplus; with the slab regime active the
     # bumped threshold (25.0) keeps the ILP out of the slab's way

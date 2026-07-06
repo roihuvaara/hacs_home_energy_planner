@@ -83,12 +83,15 @@ class ClimateConfig:
     cool_hot_day_outdoor: float = 27.0
     dew_point_margin: float = 2.0
     test_day_outdoor_max: float = 25.0  # notify: good day to trial cooling
-    # thermal regime state machine (input routing: slow actuator, slow
-    # inputs — direction never reads instantaneous room temperature)
-    regime_dwell_hours: float = 12.0  # min time per regime; heat<->cool via neutral
+    # thermal regime (input routing: slow actuator, slow inputs —
+    # direction never reads instantaneous room temperature). Transitions
+    # are free; only exit hysteresis keeps a hovering forecast from
+    # flapping the regime hourly.
     regime_cool_mean_72h: float = 17.0  # COOL needs a genuinely warm stretch...
     regime_cool_max_24h: float = 25.0  # ...with a hot day ahead
     regime_room_mean_heat_below: float = 23.2  # backup net under the 23-23.5 band
+    regime_exit_forecast_margin: float = 1.0  # widen own entry band while inside
+    regime_exit_room_margin: float = 0.2
     # within COOL, when cooling actually runs: night block (cheap, high
     # cooling COP in cool night air) or measured solar surplus
     cool_night_start_hour: int = 21
@@ -277,7 +280,6 @@ REGIME_COOL = "cool"
 
 def decide_regime(
     current: str | None,
-    hours_in_regime: float,
     forecast_avg_12h: float | None,
     forecast_mean_72h: float | None,
     forecast_max_24h: float | None,
@@ -288,27 +290,36 @@ def decide_regime(
 
     Deliberately takes no instantaneous room temperature: the slab is a
     slow actuator, so direction is decided by forecasts (predictive) and
-    at most the 24 h room *mean* as a backup net. Heat<->cool reversals
-    always pass through NEUTRAL, and every regime holds for the dwell.
+    at most the 24 h room *mean* as a backup net. Conditions rule
+    directly — any transition, any time — so a cold snap can never be
+    parked behind a dwell. The only memory is exit hysteresis: the
+    regime we are in widens its own entry band by a margin, so a
+    forecast hovering at a threshold cannot flap the regime hourly.
     """
     config = config or ClimateConfig()
 
     # predictive heat demand: the weather-base table asks for more than
     # its mildest band exactly when the 12 h forecast avg drops below
     # the first band threshold — the already-tuned heating signal
+    in_heat = current == REGIME_HEAT
     heat_needed = (
         forecast_avg_12h is not None
-        and forecast_avg_12h < config.base_bands[0][0]
+        and forecast_avg_12h
+        < config.base_bands[0][0]
+        + (config.regime_exit_forecast_margin if in_heat else 0.0)
     ) or (
         room_mean_24h is not None
-        and room_mean_24h < config.regime_room_mean_heat_below
+        and room_mean_24h
+        < config.regime_room_mean_heat_below
+        + (config.regime_exit_room_margin if in_heat else 0.0)
     )
+    cool_margin = config.regime_exit_forecast_margin if current == REGIME_COOL else 0.0
     cool_wanted = (
         not heat_needed
         and forecast_mean_72h is not None
-        and forecast_mean_72h >= config.regime_cool_mean_72h
+        and forecast_mean_72h >= config.regime_cool_mean_72h - cool_margin
         and forecast_max_24h is not None
-        and forecast_max_24h >= config.regime_cool_max_24h
+        and forecast_max_24h >= config.regime_cool_max_24h - cool_margin
     )
     target = (
         REGIME_HEAT if heat_needed else REGIME_COOL if cool_wanted else REGIME_NEUTRAL
@@ -318,13 +329,6 @@ def decide_regime(
         return target, f"initial: {target}"
     if target == current:
         return current, f"stay {current}"
-    if hours_in_regime < config.regime_dwell_hours:
-        return (
-            current,
-            f"dwell: {hours_in_regime:.0f}h < {config.regime_dwell_hours:.0f}h",
-        )
-    if {current, target} == {REGIME_HEAT, REGIME_COOL}:
-        return REGIME_NEUTRAL, f"{current}->{target} passes through neutral"
     return target, f"{current}->{target}"
 
 

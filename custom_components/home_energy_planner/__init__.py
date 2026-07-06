@@ -28,6 +28,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     climate = ClimateCoordinator(hass, entry, coordinator)
     if climate.mode != MODE_OFF:
+        await climate.async_restore_regime()
         await climate.async_refresh()
         climate.async_schedule_ticks()
 

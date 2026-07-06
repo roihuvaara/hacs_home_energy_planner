@@ -36,6 +36,19 @@ CRITICAL_INPUTS = [
 ]
 
 
+def input_is_stale(state: Any, now: datetime) -> bool:
+    """Missing/unavailable, or nothing reported for INPUT_STALE_HOURS.
+
+    Staleness reads last_reported, not last_updated: a polled sensor
+    re-reporting an unchanged value (flat outdoor temp for hours) only
+    advances last_reported, and it is alive.
+    """
+    if state is None or state.state in ("unavailable", "unknown"):
+        return True
+    reported = getattr(state, "last_reported", None) or state.last_updated
+    return (now - reported).total_seconds() > INPUT_STALE_HOURS * 3600
+
+
 @dataclass(frozen=True)
 class WatchdogSnapshot:
     prices_age_hours: float | None  # None = no price data at all
@@ -142,12 +155,7 @@ class PlannerWatchdog:
         # poll, so skip input staleness during the startup grace window
         if now - self._started >= self.STARTUP_GRACE:
             for entity_id in CRITICAL_INPUTS:
-                state = self.hass.states.get(entity_id)
-                if state is None or state.state in ("unavailable", "unknown"):
-                    stale.append(entity_id)
-                elif (
-                    now - state.last_updated
-                ).total_seconds() > INPUT_STALE_HOURS * 3600:
+                if input_is_stale(self.hass.states.get(entity_id), now):
                     stale.append(entity_id)
 
         battery = bundle.get("battery")
