@@ -536,7 +536,9 @@ class PlannerSummarySensor(CoordinatorEntity[PricingCoordinator], SensorEntity):
 
         inputs = SummaryInputs(
             horizon=horizon,
-            horizon_start=pdata.horizon_start if pdata else None,
+            # window labels are formatted with strftime downstream, so hand
+            # over a local-time datetime (horizon_start is UTC-aware)
+            horizon_start=dt_util.as_local(pdata.horizon_start) if pdata else None,
             period_minutes=15,
             soc_pct=self._float_state("sensor.solis_remaining_battery_capacity"),
             battery_charging_now=charging,
