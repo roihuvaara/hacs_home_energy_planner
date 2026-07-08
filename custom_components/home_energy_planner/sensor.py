@@ -45,6 +45,7 @@ async def async_setup_entry(
             WaterHeaterModeSensor(data["water_heater"], entry),
             IlpRecommendationSensor(data["ilp"], entry),
             ExportCurtailmentSensor(coordinator, entry),
+            PlannerSummarySensor(coordinator, entry, hass),
         ]
     )
 
@@ -390,6 +391,176 @@ class ExportCurtailmentSensor(CoordinatorEntity[PricingCoordinator], SensorEntit
                 1 for p in data.periods if p.raw_cents_per_kwh <= 0
             ),
         }
+
+
+class PlannerSummarySensor(CoordinatorEntity[PricingCoordinator], SensorEntity):
+    """Human-facing rollup: is it in control, is it cheap now, what's it doing.
+
+    Reads the other coordinators' already-published state (no device writes)
+    and reuses the watchdog's pure health logic read-only, so the dashboard
+    can lead with what a person cares about instead of optimizer internals.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Summary"
+    _attr_icon = "mdi:home-lightning-bolt"
+    _unrecorded_attributes = frozenset(
+        {"assets", "issues", "info", "next_cheap_window", "peak_window", "coming_up"}
+    )
+
+    def __init__(
+        self, coordinator: PricingCoordinator, entry: ConfigEntry, hass: HomeAssistant
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._hass = hass
+        self._attr_unique_id = f"{entry.entry_id}_summary"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": "Home Energy Planner",
+        }
+
+    def _bundle(self) -> dict[str, Any]:
+        return self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+
+    def _float_state(self, entity_id: str, attribute: str | None = None) -> float | None:
+        state = self._hass.states.get(entity_id)
+        if state is None:
+            return None
+        raw = state.attributes.get(attribute) if attribute else state.state
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _health(self, now, bundle: dict[str, Any]) -> list[str]:
+        """Attention-level issues, computed read-only (no watchdog mutation)."""
+        from datetime import timedelta
+
+        from .watchdog import (
+            APPLY_FAILING_HOURS,
+            CRITICAL_INPUTS,
+            ENGINE_FALLBACK_HOURS,
+            WatchdogSnapshot,
+            evaluate_issues,
+            input_is_stale,
+        )
+
+        pdata = self.coordinator.data
+        prices_age = None
+        horizon_hours = 0.0
+        if pdata is not None and pdata.periods:
+            prices_age = max(0.0, (now - pdata.horizon_start).total_seconds() / 3600.0)
+            horizon_hours = len(pdata.periods) * 0.25
+
+        watchdog = bundle.get("watchdog")
+        started = getattr(watchdog, "_started", None)
+        in_grace = started is not None and (now - started) < timedelta(minutes=15)
+        stale = (
+            []
+            if in_grace
+            else [e for e in CRITICAL_INPUTS if input_is_stale(self._hass.states.get(e), now)]
+        )
+
+        battery = bundle.get("battery")
+        bd = getattr(battery, "data", None)
+        failing = (
+            bd is not None
+            and bd.mode == "control"
+            and bd.applied is not None
+            and not bd.applied.get("success")
+        )
+        fallback = (
+            battery is not None
+            and bd is not None
+            and bd.engine != "lp"
+            and str(battery._option("battery_engine")) == "lp"  # noqa: SLF001
+        )
+        snapshot = WatchdogSnapshot(
+            prices_age_hours=prices_age,
+            horizon_hours=horizon_hours,
+            stale_inputs=stale,
+            battery_apply_failing_hours=APPLY_FAILING_HOURS if failing else 0.0,
+            engine_fallback_hours=ENGINE_FALLBACK_HOURS if fallback else 0.0,
+        )
+        return [msg for _key, msg in evaluate_issues(snapshot)]
+
+    def _compute(self) -> dict[str, Any]:
+        from homeassistant.util import dt as dt_util
+
+        from .summary import SummaryInputs, build_summary
+
+        now = dt_util.now()
+        bundle = self._bundle()
+        pdata = self.coordinator.data
+        horizon = (
+            [p.all_in_cents_per_kwh for p in pdata.periods] if pdata else []
+        )
+
+        battery = bundle.get("battery")
+        bd = getattr(battery, "data", None)
+        charging = discharging = False
+        if bd is not None and bd.plan.periods:
+            first = bd.plan.periods[0]
+            charging = first.grid_charge_kwh > 0
+            discharging = first.discharge_to_load_kwh > 0
+
+        wc = bundle.get("water_heater")
+        wdata = getattr(wc, "data", None)
+        tank_temp = None
+        water_override = None
+        if wc is not None:
+            tank_temp = self._float_state(
+                str(wc._option("water_heater_entity")), "current_temperature"  # noqa: SLF001
+            )
+            water_override = wc._override.until or wc._power_override.until  # noqa: SLF001
+
+        cc = bundle.get("climate")
+        cdata = getattr(cc, "data", None)
+        ic = bundle.get("ilp")
+        idata = getattr(ic, "data", None)
+
+        info: list[str] = []
+
+        def _note(label: str, until) -> None:
+            if until is not None and until > now:
+                info.append(f"{label} held manually until {until.strftime('%H:%M')}")
+
+        if wc is not None:
+            _note("Hot water", wc._override.until)  # noqa: SLF001
+            _note("Hot water on/off", wc._power_override.until)  # noqa: SLF001
+        if ic is not None:
+            _note("Air-air", ic._override.until)  # noqa: SLF001
+        if cc is not None:
+            _note("Heat pump", cc._override.until)  # noqa: SLF001
+
+        inputs = SummaryInputs(
+            horizon=horizon,
+            horizon_start=pdata.horizon_start if pdata else None,
+            period_minutes=15,
+            soc_pct=self._float_state("sensor.solis_remaining_battery_capacity"),
+            battery_charging_now=charging,
+            battery_discharging_now=discharging,
+            water_mode=wdata.effective_mode if wdata else None,
+            tank_temp=tank_temp,
+            water_override_until=water_override,
+            climate_regime=getattr(cc, "regime", None),
+            climate_target=cdata.result.target if cdata else None,
+            room_temp=cdata.room_temp if cdata else None,
+            ilp_action=idata.effective_action if idata else None,
+            ilp_reason=idata.result.reason if idata else None,
+            issues=self._health(now, bundle),
+            info=info,
+        )
+        return build_summary(inputs)
+
+    @property
+    def native_value(self) -> str | None:
+        return self._compute()["headline"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self._compute()
 
 
 class IlpRecommendationSensor(CoordinatorEntity[IlpCoordinator], SensorEntity):
