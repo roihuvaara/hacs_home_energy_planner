@@ -90,6 +90,14 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         from .manual_override import ManualOverrideTracker
 
         self._override = ManualOverrideTracker()
+        from .override_store import OverridePersistence
+
+        self._override_persist = OverridePersistence(
+            hass, entry.entry_id, "ilp", {"hvac": self._override}
+        )
+
+    async def async_restore_overrides(self) -> None:
+        await self._override_persist.async_restore()
 
     @property
     def preferences(self):
@@ -251,6 +259,7 @@ class IlpCoordinator(DataUpdateCoordinator[IlpData]):
         applied: dict[str, Any] | None = None
         if mode == MODE_CONTROL:
             applied = await self._async_apply(effective)
+            self._override_persist.save()
 
         return IlpData(
             result=result,

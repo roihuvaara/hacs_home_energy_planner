@@ -114,6 +114,17 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
 
         self._override = ManualOverrideTracker()
         self._hvac_override = ManualOverrideTracker()
+        from .override_store import OverridePersistence
+
+        self._override_persist = OverridePersistence(
+            hass,
+            entry.entry_id,
+            "climate",
+            {"target": self._override, "hvac": self._hvac_override},
+        )
+
+    async def async_restore_overrides(self) -> None:
+        await self._override_persist.async_restore()
 
     @property
     def regime(self) -> str | None:
@@ -505,6 +516,7 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
                     "success": True,
                     "hvac": "off",
                 }
+            self._override_persist.save()
 
         return ClimateData(
             result=result,

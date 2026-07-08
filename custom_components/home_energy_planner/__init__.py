@@ -33,16 +33,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     climate = ClimateCoordinator(hass, entry, coordinator, preferences)
     if climate.mode != MODE_OFF:
         await climate.async_restore_regime()
+        await climate.async_restore_overrides()
         await climate.async_refresh()
         climate.async_schedule_ticks()
 
     water_heater = WaterHeaterCoordinator(hass, entry, coordinator, preferences)
     if water_heater.mode != MODE_OFF:
+        await water_heater.async_restore_overrides()
         await water_heater.async_refresh()
         water_heater.async_schedule_ticks()
 
     ilp = IlpCoordinator(hass, entry, coordinator, preferences)
     if ilp.mode != MODE_OFF:
+        await ilp.async_restore_overrides()
         await ilp.async_refresh()
         ilp.async_schedule_ticks()
 

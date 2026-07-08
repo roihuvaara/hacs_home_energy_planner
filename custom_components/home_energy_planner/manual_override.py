@@ -38,6 +38,36 @@ class ManualOverrideTracker:
         self._manual_value = None
         self._expired_manual = None
 
+    def to_dict(self) -> dict[str, object | None]:
+        """Serialize for persistence across restarts (JSON-safe primitives)."""
+        return {
+            "last_written": self.last_written,
+            "until": self.until.isoformat() if self.until else None,
+            "count": self.count,
+            "manual_value": self._manual_value,
+            "expired_manual": self._expired_manual,
+        }
+
+    def load_dict(self, data: dict | None) -> None:
+        """Restore state saved by ``to_dict``; a missing/corrupt blob is a no-op.
+
+        Restoring provenance is the whole point: without it, a restart makes
+        the planner disown its own last write and treat the device's current
+        (planner-authored) state as a fresh manual override, blocking
+        reconciliation for a full hold window.
+        """
+        if not data:
+            return
+        self.last_written = data.get("last_written")
+        until = data.get("until")
+        self.until = datetime.fromisoformat(until) if isinstance(until, str) else None
+        try:
+            self.count = int(data.get("count") or 0)
+        except (TypeError, ValueError):
+            self.count = 0
+        self._manual_value = data.get("manual_value")
+        self._expired_manual = data.get("expired_manual")
+
     def suppressed(
         self, device_value: object | None, desired: object, now: datetime, hold: timedelta
     ) -> bool:

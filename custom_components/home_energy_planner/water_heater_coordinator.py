@@ -95,6 +95,17 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         # respected for the hold window, then reconciled back on (the tank
         # must never sit off indefinitely — it only cools and drains)
         self._power_override = ManualOverrideTracker()
+        from .override_store import OverridePersistence
+
+        self._override_persist = OverridePersistence(
+            hass,
+            entry.entry_id,
+            "water_heater",
+            {"setpoint": self._override, "power": self._power_override},
+        )
+
+    async def async_restore_overrides(self) -> None:
+        await self._override_persist.async_restore()
 
     @property
     def preferences(self):
@@ -223,6 +234,7 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         applied: dict[str, Any] | None = None
         if mode == MODE_CONTROL:
             applied = await self._async_apply(effective_target)
+            self._override_persist.save()
 
         legacy_state = self.hass.states.get(
             str(self._option("legacy_water_heater_mode_entity"))

@@ -123,6 +123,34 @@ def test_manual_power_off_respected_then_reconciled_on():
     assert not power.suppressed("off", "on", now_at(15), HOLD)
 
 
+def test_provenance_survives_restart_round_trip():
+    # planner wrote "dry"; a restart must not disown that write and treat the
+    # device's still-"dry" state as a fresh manual override (the ILP bug)
+    live = ManualOverrideTracker()
+    live.record_write("dry")
+    restored = ManualOverrideTracker()
+    restored.load_dict(live.to_dict())
+    # device still holds our value -> normal write path, no override
+    assert not restored.suppressed("dry", "off", now_at(10), HOLD)
+    assert restored.count == 0
+    # contrast: without restore, provenance is unknown -> 4h grace window
+    fresh = ManualOverrideTracker()
+    assert fresh.suppressed("dry", "off", now_at(10), HOLD)
+
+
+def test_active_override_window_survives_restart():
+    # a genuine manual override mid-window keeps its remaining hold after a
+    # restart instead of resetting the clock
+    live = ManualOverrideTracker()
+    live.record_write(55)
+    assert live.suppressed(60, 51, now_at(10), HOLD)  # human set 60, 4h hold
+    restored = ManualOverrideTracker()
+    restored.load_dict(live.to_dict())
+    assert restored.count == 1
+    assert restored.suppressed(60, 51, now_at(12), HOLD)  # still held post-restart
+    assert not restored.suppressed(60, 51, now_at(15), HOLD)  # original expiry holds
+
+
 def test_boost_never_reads_as_a_power_override():
     # performance normalizes to "on" upstream, so the tracker only ever sees
     # "on" vs "on": a manual boost is never mistaken for an off to correct
