@@ -7,6 +7,7 @@ sys.path.insert(0, str(REPO / "custom_components"))
 from home_energy_planner.water_heater_core import (  # noqa: E402
     WaterHeaterInputs,
     compute_water_heater_mode,
+    normalized_power,
 )
 
 
@@ -108,3 +109,13 @@ def test_negative_price_quarter_boosts():
 def test_empty_horizon_runs_normal():
     result = compute_water_heater_mode(make_inputs(future_all_in=[]))
     assert result.mode == "normal"
+
+
+def test_normalized_power_maps_boost_to_on_and_unknown_to_none():
+    assert normalized_power("off") == "off"
+    assert normalized_power("heat_pump") == "on"
+    # performance is the boost mode: a running state, never fought as an off
+    assert normalized_power("performance") == "on"
+    # unavailable / unknown modes leave the heater alone
+    assert normalized_power(None) is None
+    assert normalized_power("eco") is None

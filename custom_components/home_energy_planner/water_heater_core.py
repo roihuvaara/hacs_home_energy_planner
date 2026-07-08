@@ -30,6 +30,33 @@ MODE_CHEAP_BOOST = "cheap_boost"
 MODE_NORMAL = "normal"
 MODE_HOLD = "hold"
 
+# Device operation modes on the Versati water_heater entity
+# (operation_list: off / heat_pump / performance).
+HEATER_MODE_OFF = "off"
+HEATER_MODE_ON = "heat_pump"  # efficient running mode we reconcile an off tank to
+HEATER_ON_MODES = frozenset({"heat_pump", "performance"})
+
+
+def normalized_power(operation_mode: str | None) -> str | None:
+    """Collapse the device operation mode to an on/off signal for override.
+
+    The planner only ever nudges the *setpoint*; it assumes the heater is
+    running. So the on/off state is tracked as its own manually-overridable
+    value: a human switch-off is respected for the hold window like any
+    override, then reconciled back on at expiry — never stomped on the next
+    tick, never left off forever.
+
+    ``performance`` is the boost mode: a valid running state that maps to
+    "on", so a manual (or planned) boost is never fought. Unknown modes and
+    unavailable (``None``) map to ``None`` so the caller leaves a heater it
+    cannot read alone.
+    """
+    if operation_mode == HEATER_MODE_OFF:
+        return "off"
+    if operation_mode in HEATER_ON_MODES:
+        return "on"
+    return None
+
 
 @dataclass(frozen=True)
 class WaterHeaterConfig:

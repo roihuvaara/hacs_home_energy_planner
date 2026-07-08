@@ -107,3 +107,26 @@ def test_zero_hold_disables_override():
     tracker = ManualOverrideTracker()
     tracker.record_write("off")
     assert not tracker.suppressed("dry", "cool", now_at(10), timedelta(0))
+
+
+def test_manual_power_off_respected_then_reconciled_on():
+    # the tank's on/off state is tracked as its own override: a manual off
+    # is respected for the hold window, then reconciled back on at expiry
+    # (never stomped on the next 15-min tick, never left off forever)
+    power = ManualOverrideTracker()
+    power.record_write("on")  # planner had it running
+    # human switches it off: respected for the whole 4h window
+    assert power.suppressed("off", "on", now_at(10), HOLD)
+    assert power.count == 1
+    assert power.suppressed("off", "on", now_at(13), HOLD)  # +3h, still held
+    # window elapsed: planner is free to reconcile -> writes "on"
+    assert not power.suppressed("off", "on", now_at(15), HOLD)
+
+
+def test_boost_never_reads_as_a_power_override():
+    # performance normalizes to "on" upstream, so the tracker only ever sees
+    # "on" vs "on": a manual boost is never mistaken for an off to correct
+    power = ManualOverrideTracker()
+    power.record_write("on")
+    assert not power.suppressed("on", "on", now_at(10), HOLD)
+    assert power.count == 0

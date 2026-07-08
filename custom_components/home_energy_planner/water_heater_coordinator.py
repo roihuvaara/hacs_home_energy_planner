@@ -91,6 +91,10 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         from .manual_override import ManualOverrideTracker
 
         self._override = ManualOverrideTracker()
+        # the on/off state is overridable in its own right: a manual off is
+        # respected for the hold window, then reconciled back on (the tank
+        # must never sit off indefinitely — it only cools and drains)
+        self._power_override = ManualOverrideTracker()
 
     @property
     def preferences(self):
@@ -235,20 +239,53 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
     async def _async_apply(self, target: int) -> dict[str, Any]:
         from homeassistant.util import dt as dt_util
 
+        from .water_heater_core import HEATER_MODE_ON, normalized_power
+
+        now = dt_util.now()
+        hold = self._override_hold()
         entity_id = str(self._option("water_heater_entity"))
         state = self.hass.states.get(entity_id)
+
+        # power invariant: a tank found off is respected for the hold window
+        # (manual off is a real override) and then reconciled back on. Boost
+        # (performance) normalizes to "on" and is never fought; a heater whose
+        # mode we cannot read (None) is left alone.
+        op_mode = state.attributes.get("operation_mode") if state else None
+        power = normalized_power(op_mode)
+        power_result: dict[str, Any] = {"operation_mode": op_mode}
+        if power == "off" and not self._power_override.suppressed(
+            "off", "on", now, hold
+        ):
+            try:
+                await self.hass.services.async_call(
+                    "water_heater",
+                    "set_operation_mode",
+                    {"entity_id": entity_id, "operation_mode": HEATER_MODE_ON},
+                    blocking=True,
+                )
+            except Exception as err:  # noqa: BLE001 - report, retry next tick
+                _LOGGER.warning("Water heater turn-on failed: %s", err)
+                power_result["turn_on_error"] = str(err)
+            else:
+                self._power_override.record_write("on")
+                power_result["turned_on"] = True
+        elif power == "on":
+            # observed running (normal or boost): our value holds, so a later
+            # off reads as a fresh override rather than unknown provenance
+            self._power_override.record_write("on")
+        if self._power_override.until is not None:
+            power_result["power_override_until"] = self._power_override.until.isoformat()
+
         current = state.attributes.get("temperature") if state else None
         try:
             current_value = int(float(current)) if current is not None else None
         except (TypeError, ValueError):
             current_value = None
         if current_value is not None and current_value == target:
-            return {"success": True, "written": False, "target": target}
+            return {**power_result, "success": True, "written": False, "target": target}
         provenance_known = self._override.last_written is not None
         count_before = self._override.count
-        if self._override.suppressed(
-            current_value, target, dt_util.now(), self._override_hold()
-        ):
+        if self._override.suppressed(current_value, target, now, hold):
             # tank-target overrides learn a per-weekday offset (weekly
             # rhythms: gym/laundry/sauna-ish days) via preference.py
             if (
@@ -263,6 +300,7 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
                     {"mode": self._effective_mode},
                 )
             return {
+                **power_result,
                 "success": True,
                 "written": False,
                 "target": target,
@@ -279,6 +317,6 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
             )
         except Exception as err:  # noqa: BLE001 - report, retry next tick
             _LOGGER.warning("Water heater target write failed: %s", err)
-            return {"success": False, "written": False, "error": str(err)}
+            return {**power_result, "success": False, "written": False, "error": str(err)}
         self._override.record_write(target)
-        return {"success": True, "written": True, "target": target}
+        return {**power_result, "success": True, "written": True, "target": target}
