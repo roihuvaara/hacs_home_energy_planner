@@ -46,6 +46,8 @@ async def async_setup_entry(
             IlpRecommendationSensor(data["ilp"], entry),
             ExportCurtailmentSensor(coordinator, entry),
             PlannerSummarySensor(coordinator, entry, hass),
+            AllInPriceEurSensor(coordinator, entry),
+            SelfSufficiencySensor(coordinator, entry, hass),
         ]
     )
 
@@ -391,6 +393,84 @@ class ExportCurtailmentSensor(CoordinatorEntity[PricingCoordinator], SensorEntit
                 1 for p in data.periods if p.raw_cents_per_kwh <= 0
             ),
         }
+
+
+class AllInPriceEurSensor(CoordinatorEntity[PricingCoordinator], SensorEntity):
+    """All-in price in EUR/kWh, for the HA Energy dashboard's price entity.
+
+    The Energy dashboard integrates cost as (energy delta x price) over each
+    short recorder interval, so pointing a grid source's `entity_energy_price`
+    here gives true spot-priced cost — the near-realtime integration a flat
+    tariff cannot. Our other price sensors are c/kWh; HA wants currency/kWh.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "All-in price EUR"
+    _attr_native_unit_of_measurement = "EUR/kWh"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:cash-clock"
+    _attr_suggested_display_precision = 4
+
+    def __init__(self, coordinator: PricingCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_all_in_price_eur"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": "Home Energy Planner",
+        }
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data
+        if data is None or not data.periods:
+            return None
+        return round(data.periods[0].all_in_cents_per_kwh / 100.0, 4)
+
+
+class SelfSufficiencySensor(CoordinatorEntity[PricingCoordinator], SensorEntity):
+    """Share of the current house load covered by sun + battery (0–100 %).
+
+    Instantaneous, from live power; recorded as a measurement so HA's
+    statistics give the month-on-month mean (a spot-price house can't read
+    self-sufficiency off a monthly kWh counter). Grid power sign convention:
+    positive = export, negative = import (as used across the writers).
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Self-sufficiency"
+    _attr_native_unit_of_measurement = "%"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:solar-power-variant"
+    _attr_suggested_display_precision = 0
+
+    _CONSUMPTION_ENTITY = "sensor.solis_total_consumption_power"
+    _GRID_POWER_ENTITY = "sensor.solis_power_grid_total_power"
+
+    def __init__(
+        self, coordinator: PricingCoordinator, entry: ConfigEntry, hass: HomeAssistant
+    ) -> None:
+        super().__init__(coordinator)
+        self._hass = hass
+        self._attr_unique_id = f"{entry.entry_id}_self_sufficiency"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": "Home Energy Planner",
+        }
+
+    def _watt(self, entity_id: str) -> float | None:
+        state = self._hass.states.get(entity_id)
+        try:
+            return float(state.state)  # type: ignore[union-attr]
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    @property
+    def native_value(self) -> float | None:
+        from .summary import self_sufficiency_pct
+
+        grid = self._watt(self._GRID_POWER_ENTITY)
+        import_w = -grid if grid is not None else None
+        return self_sufficiency_pct(self._watt(self._CONSUMPTION_ENTITY), import_w)
 
 
 class PlannerSummarySensor(CoordinatorEntity[PricingCoordinator], SensorEntity):

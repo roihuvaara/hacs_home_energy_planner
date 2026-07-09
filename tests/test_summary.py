@@ -14,6 +14,7 @@ from home_energy_planner.summary import (  # noqa: E402
     extreme_window,
     ilp_text,
     price_stance,
+    self_sufficiency_pct,
     water_text,
 )
 
@@ -49,6 +50,18 @@ def test_asset_text_reads_like_a_human():
     assert climate_text("neutral", None, 23.0) == "idle — house comfortable · room 23.0°C"
     assert ilp_text("dry", "humid room in cheap half") == "drying — humid room in cheap half"
     assert ilp_text("off", "comfortable") == "off — comfortable"
+
+
+def test_self_sufficiency_pct():
+    # night, all load from the grid -> ~0 %
+    assert self_sufficiency_pct(5421, 5418) == 0.1
+    # exporting (negative import clamps to 0) -> fully self-sufficient
+    assert self_sufficiency_pct(2000, -1500) == 100.0
+    # half covered
+    assert self_sufficiency_pct(2000, 1000) == 50.0
+    # no load / unknown -> None, never divide by zero
+    assert self_sufficiency_pct(0, 100) is None
+    assert self_sufficiency_pct(None, 100) is None
 
 
 def test_build_summary_headline_and_windows():

@@ -22,6 +22,24 @@ FLAT_SPREAD_CENTS = 1.0
 WINDOW_QUARTERS = 4  # 1 h — a meaningful "cheap window to run something"
 
 
+def self_sufficiency_pct(
+    consumption_w: float | None, grid_import_w: float | None
+) -> float | None:
+    """Share of the current house load NOT drawn from the grid (0–100).
+
+    Instantaneous, from near-realtime power — the honest substrate for a
+    spot-price house, where a monthly kWh counter says nothing about *when*
+    energy flowed. Recorded as a measurement, so HA's statistics give the
+    month-on-month mean without a bespoke monthly counter. 100 % = the load
+    is fully covered by sun + battery; 0 % = all from the grid.
+    """
+    if consumption_w is None or consumption_w <= 0:
+        return None
+    imported = max(0.0, grid_import_w or 0.0)
+    covered = min(max(consumption_w - imported, 0.0), consumption_w)
+    return round(100.0 * covered / consumption_w, 1)
+
+
 def percentile_rank(values: list[float], current: float) -> float:
     """Fraction of the horizon at or below the current price (0 = cheapest)."""
     if not values:
