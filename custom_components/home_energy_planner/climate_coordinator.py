@@ -100,6 +100,7 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         self._lead_hold_until: datetime | None = None
         self._last_write: tuple[float, datetime] | None = None
         self._trial_until: datetime | None = None
+        self._trial_revert_cancel: Any | None = None
         self._last_test_notify = None
         self._regime: str | None = None
         self._regime_since: datetime | None = None
@@ -328,10 +329,16 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             {"entity_id": climate_entity, "temperature": target},
             blocking=True,
         )
+        # extending/restarting a trial must kill the previous revert timer,
+        # or the old one still fires and flips the pump back mid-trial
+        if self._trial_revert_cancel is not None:
+            self._trial_revert_cancel()
+            self._trial_revert_cancel = None
         self._trial_until = dt_util.now() + timedelta(minutes=minutes)
 
         async def _revert(_now: Any) -> None:
             self._trial_until = None
+            self._trial_revert_cancel = None
             await self.hass.services.async_call(
                 "climate",
                 "set_hvac_mode",
@@ -344,7 +351,9 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             )
             await self.async_request_refresh()
 
-        async_call_later(self.hass, timedelta(minutes=minutes), _revert)
+        self._trial_revert_cancel = async_call_later(
+            self.hass, timedelta(minutes=minutes), _revert
+        )
         await self._async_notify(
             "Hydronic cooling trial started",
             f"Cool mode at {target} C water for {minutes} min (room dew point {dew} C). Watch the manifold for sweating.",
