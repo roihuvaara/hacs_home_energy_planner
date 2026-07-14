@@ -24,6 +24,7 @@ from .solis_slots import (
     SLOT_COUNT,
     SlotSpec,
     WriteOp,
+    clamp_slot_values,
     diff_tables,
     diff_write_ops,
     find_cross_side_overlaps,
@@ -217,6 +218,32 @@ async def apply_slots(
             "problems": problems,
         }
 
+    def _device_range(side: str):
+        def get_range(slot: int, field: str):
+            state = hass.states.get(_entity_id(prefix, side, slot, field))
+            if state is None:
+                return None
+            low = state.attributes.get("min")
+            high = state.attributes.get("max")
+            if low is None and high is None:
+                return None
+            return (
+                float(low) if low is not None else None,
+                float(high) if high is not None else None,
+            )
+
+        return get_range
+
+    desired_charge, clamp_notes = clamp_slot_values(
+        desired_charge, _device_range("charge"), "charge"
+    )
+    desired_discharge, discharge_notes = clamp_slot_values(
+        desired_discharge, _device_range("discharge"), "discharge"
+    )
+    clamp_notes.extend(discharge_notes)
+    if clamp_notes:
+        _LOGGER.warning("Solis slot values clamped to device ranges: %s", clamp_notes)
+
     try:
         current_charge = read_slot_table(hass, prefix, "charge")
         current_discharge = read_slot_table(hass, prefix, "discharge")
@@ -245,6 +272,7 @@ async def apply_slots(
             "prefix": prefix,
             "ops_planned": ops_payload,
             "op_count": len(ops),
+            "clamped": clamp_notes,
             "cross_side_overlaps": overlaps,
             "current": _tables_payload(current_charge, current_discharge),
         }
@@ -299,6 +327,7 @@ async def apply_slots(
         "prefix": prefix,
         "ops_planned": ops_payload,
         "op_count": len(ops),
+        "clamped": clamp_notes,
         "ops_completed": completed,
         "retry_errors": retry_errors,
         "immediate_verification_ok": not immediate_mismatches,

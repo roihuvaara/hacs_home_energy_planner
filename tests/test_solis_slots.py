@@ -12,6 +12,7 @@ from solis_slots import (  # noqa: E402
     SLOT_COUNT,
     SlotSpec,
     WriteOp,
+    clamp_slot_values,
     diff_tables,
     diff_write_ops,
     find_cross_side_overlaps,
@@ -131,3 +132,56 @@ def test_verification_diff_reports_field_level_mismatch():
             "actual": "00:00-00:00",
         }
     ]
+
+
+def test_clamp_raises_soc_to_device_minimum():
+    # live incident 2026-07-14: hold slot soc 18 (reserve floor) rejected by
+    # slot1_discharge_soc whose dynamic min is over-discharge SOC + 1 = 19
+    ranges = {(1, "soc"): (19.0, 100.0)}
+    clamped, notes = clamp_slot_values(
+        table(slot("22:00-06:00", True, 0, 18)),
+        lambda s, f: ranges.get((s, f)),
+        "discharge",
+    )
+    assert clamped[0].soc == 19
+    assert clamped[0].current == 0
+    assert notes == ["discharge slot 1 soc: 18 -> 19 (device range 19.0-100.0)"]
+
+
+def test_clamp_lowers_current_to_device_maximum():
+    ranges = {(1, "current"): (0.0, 50.0)}
+    clamped, notes = clamp_slot_values(
+        table(slot("02:00-04:00", True, 62, 90)),
+        lambda s, f: ranges.get((s, f)),
+        "charge",
+    )
+    assert clamped[0].current == 50
+    assert clamped[0].soc == 90
+    assert len(notes) == 1
+
+
+def test_clamp_in_range_and_unknown_range_untouched():
+    original = table(slot("02:00-04:00", True, 20, 90), slot("12:00-13:00", True, 5, 40))
+    clamped, notes = clamp_slot_values(
+        original,
+        lambda s, f: (0.0, 100.0) if s == 1 else None,
+        "charge",
+    )
+    assert clamped == original
+    assert notes == []
+
+
+def test_clamp_rounds_inward_on_fractional_bounds():
+    ranges = {(1, "soc"): (18.5, 99.5)}
+    low, _ = clamp_slot_values(
+        table(slot("22:00-06:00", True, 0, 18)),
+        lambda s, f: ranges.get((s, f)),
+        "discharge",
+    )
+    high, _ = clamp_slot_values(
+        table(slot("22:00-06:00", True, 0, 100)),
+        lambda s, f: ranges.get((s, f)),
+        "discharge",
+    )
+    assert low[0].soc == 19
+    assert high[0].soc == 99

@@ -26,18 +26,42 @@ APPLY_FAILING_HOURS = 2.0
 ENGINE_FALLBACK_HOURS = 1.0
 RENOTIFY_HOURS = 24.0
 
+@dataclass(frozen=True)
+class InputRule:
+    """Staleness rule for one critical input.
+
+    stale_hours: silence tolerated before flagging.
+    off_when: entity whose literal "off" state makes this input's silence
+    expected (a powered-down device cannot report), so the check is skipped;
+    any other gate state (including unavailable) keeps the check active.
+    """
+
+    entity_id: str
+    stale_hours: float = INPUT_STALE_HOURS
+    off_when: str | None = None
+
+
 CRITICAL_INPUTS = [
-    "sensor.olohuone_climate_lampotila",
-    "sensor.olohuone_climate_kosteus",
-    "sensor.ilp_ulkolampotila",
-    "sensor.solis_remaining_battery_capacity",
-    "sensor.solis_total_consumption_power",
-    "sensor.solis_power_grid_total_power",
+    InputRule("sensor.olohuone_climate_lampotila"),
+    InputRule("sensor.olohuone_climate_kosteus"),
+    # the Gree unit stops reporting outdoor temp (state "unknown") whenever
+    # it is off — nightly, by plan; the only consumer is a gap-tolerant
+    # 7-day recorder mean
+    InputRule("sensor.ilp_ulkolampotila", off_when="climate.living_room"),
+    # SolisCloud re-reports SOC only on change: a battery idling at the
+    # reserve floor is legitimately silent all night (observed 2026-07-14,
+    # flat 18 % from 23:07). Datalogger death still alarms within 3 h via
+    # the grid power sensor below.
+    InputRule("sensor.solis_remaining_battery_capacity", stale_hours=12.0),
+    InputRule("sensor.solis_total_consumption_power"),
+    InputRule("sensor.solis_power_grid_total_power"),
 ]
 
 
-def input_is_stale(state: Any, now: datetime) -> bool:
-    """Missing/unavailable, or nothing reported for INPUT_STALE_HOURS.
+def input_is_stale(
+    state: Any, now: datetime, stale_hours: float = INPUT_STALE_HOURS
+) -> bool:
+    """Missing/unavailable, or nothing reported for stale_hours.
 
     Staleness reads last_reported, not last_updated: a polled sensor
     re-reporting an unchanged value (flat outdoor temp for hours) only
@@ -46,7 +70,7 @@ def input_is_stale(state: Any, now: datetime) -> bool:
     if state is None or state.state in ("unavailable", "unknown"):
         return True
     reported = getattr(state, "last_reported", None) or state.last_updated
-    return (now - reported).total_seconds() > INPUT_STALE_HOURS * 3600
+    return (now - reported).total_seconds() > stale_hours * 3600
 
 
 @dataclass(frozen=True)
@@ -82,7 +106,7 @@ def evaluate_issues(snapshot: WatchdogSnapshot) -> list[tuple[str, str]]:
         issues.append(
             (
                 f"input:{entity_id}",
-                f"{entity_id} unavailable or stale > {INPUT_STALE_HOURS:.0f} h — "
+                f"{entity_id} unavailable or silent past its staleness budget — "
                 "dependent logic is degraded (check sensor/battery).",
             )
         )
@@ -154,9 +178,15 @@ class PlannerWatchdog:
         # restored states keep pre-restart last_updated until integrations
         # poll, so skip input staleness during the startup grace window
         if now - self._started >= self.STARTUP_GRACE:
-            for entity_id in CRITICAL_INPUTS:
-                if input_is_stale(self.hass.states.get(entity_id), now):
-                    stale.append(entity_id)
+            for rule in CRITICAL_INPUTS:
+                if rule.off_when is not None:
+                    gate = self.hass.states.get(rule.off_when)
+                    if gate is not None and gate.state == "off":
+                        continue
+                if input_is_stale(
+                    self.hass.states.get(rule.entity_id), now, rule.stale_hours
+                ):
+                    stale.append(rule.entity_id)
 
         battery = bundle.get("battery")
         battery_data = getattr(battery, "data", None)

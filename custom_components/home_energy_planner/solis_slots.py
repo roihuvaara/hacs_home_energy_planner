@@ -61,6 +61,45 @@ def normalize_table(raw: Sequence[Mapping[str, object]] | None) -> list[SlotSpec
     return table
 
 
+def clamp_slot_values(
+    table: Sequence[SlotSpec],
+    get_range,
+    side: str,
+) -> tuple[list[SlotSpec], list[str]]:
+    """Clamp current/soc to the device's advertised numeric ranges.
+
+    The inverter narrows some ranges dynamically (discharge SOC min is
+    over-discharge SOC + 1), so a planner value can be deterministically
+    rejected no matter how often it is retried. ``get_range(slot, field)``
+    returns (min, max) — either bound may be None — or None when unknown.
+    """
+    import math
+    from dataclasses import replace
+
+    out: list[SlotSpec] = []
+    notes: list[str] = []
+    for index, slot in enumerate(table, start=1):
+        values = {"current": slot.current, "soc": slot.soc}
+        for field_name, value in list(values.items()):
+            bounds = get_range(index, field_name)
+            if bounds is None:
+                continue
+            low, high = bounds
+            clamped = value
+            if low is not None and clamped < low:
+                clamped = int(math.ceil(low))
+            if high is not None and clamped > high:
+                clamped = int(math.floor(high))
+            if clamped != value:
+                values[field_name] = clamped
+                notes.append(
+                    f"{side} slot {index} {field_name}: {value} -> {clamped} "
+                    f"(device range {low}-{high})"
+                )
+        out.append(replace(slot, current=values["current"], soc=values["soc"]))
+    return out, notes
+
+
 def validate_table(table: Sequence[SlotSpec], side: str) -> list[str]:
     """Return human-readable problems; empty list means valid."""
 

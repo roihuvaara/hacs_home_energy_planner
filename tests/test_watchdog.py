@@ -8,6 +8,7 @@ sys.path.insert(0, str(REPO / "custom_components"))
 from types import SimpleNamespace  # noqa: E402
 
 from home_energy_planner.watchdog import (  # noqa: E402
+    CRITICAL_INPUTS,
     Debouncer,
     WatchdogSnapshot,
     evaluate_issues,
@@ -66,6 +67,29 @@ def test_input_staleness_uses_last_reported():
     assert input_is_stale(dead, now)
     assert input_is_stale(None, now)
     assert input_is_stale(SimpleNamespace(state="unavailable"), now)
+
+
+def test_input_staleness_respects_per_input_threshold():
+    # SolisCloud reports SOC only on change: a battery idling at the
+    # reserve floor is silent overnight and must not alarm at 3 h
+    now = datetime(2026, 7, 15, 6, 0, tzinfo=timezone.utc)
+    idle_overnight = SimpleNamespace(
+        state="18.0",
+        last_updated=now - timedelta(hours=7),
+        last_reported=now - timedelta(hours=7),
+    )
+    assert input_is_stale(idle_overnight, now)  # default 3 h budget
+    assert not input_is_stale(idle_overnight, now, stale_hours=12.0)
+    assert input_is_stale(idle_overnight, now + timedelta(hours=6), stale_hours=12.0)
+
+
+def test_critical_input_rules_encode_known_quiet_inputs():
+    rules = {rule.entity_id: rule for rule in CRITICAL_INPUTS}
+    # ILP outdoor temp reads "unknown" whenever the unit itself is off
+    assert rules["sensor.ilp_ulkolampotila"].off_when == "climate.living_room"
+    # SOC is silent while the battery idles; grid power keeps the fast alarm
+    assert rules["sensor.solis_remaining_battery_capacity"].stale_hours == 12.0
+    assert rules["sensor.solis_power_grid_total_power"].stale_hours == 3.0
 
 
 def test_debouncer_once_per_day():
