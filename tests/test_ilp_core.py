@@ -205,3 +205,28 @@ def test_slab_cooling_raises_ilp_threshold():
     # the hard max still overrides regardless of the slab
     hard = compute_ilp_action(make_inputs(room_temp=25.6, slab_cooling=True))
     assert hard.action == "cool"
+
+
+# --- ranked cheap windows (replaced the median split) --------------------------
+
+
+def test_flat_day_is_never_cheap():
+    # median split called half of a flat day "cheap"; ranked windows with a
+    # margin call none of it cheap
+    flat = [12.0] * 96
+    result = compute_ilp_action(make_inputs(room_temp=24.8, future_all_in=flat))
+    assert result.action == "off"
+
+
+def test_slightly_below_median_is_not_cheap_within_margin():
+    # current quarter 0.5 c below the median: previously "cheap", now not
+    prices = [11.5] * 48 + [12.5] * 48
+    result = compute_ilp_action(make_inputs(room_temp=24.8, future_all_in=prices))
+    assert result.action == "off"
+
+
+def test_genuinely_cheap_window_still_triggers():
+    prices = [6.0] * 8 + [14.0] * 88  # now is deep in the cheapest stretch
+    result = compute_ilp_action(make_inputs(room_temp=24.8, future_all_in=prices))
+    assert result.action == "cool"
+    assert "cheap" in result.reason

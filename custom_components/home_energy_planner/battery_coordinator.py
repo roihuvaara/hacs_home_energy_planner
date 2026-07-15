@@ -69,6 +69,7 @@ DEFAULTS = {
     "tank_daily_draw_kwh": 1.0,
     "tank_min_run_quarters": 3,
     "fuse_kw": 17.0,
+    "load_history_days": 28,
 }
 LOAD_SCALE_MIN = 0.7
 LOAD_SCALE_MAX = 1.4
@@ -145,18 +146,27 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         except (AttributeError, TypeError, ValueError):
             return fallback
 
-    async def load_baseline_kwh_by_quarter(self, now: datetime) -> dict[int, float]:
-        """Mean load kWh per quarter-hour-of-day from 7 days of recorder stats."""
+    async def load_baseline_kwh_by_quarter(
+        self, now: datetime
+    ) -> dict[tuple[int, int], float]:
+        """Weekday-blended load kWh per (weekday, quarter-of-day) bucket.
+
+        28 days of 5-minute recorder means, blended per weekday against
+        the all-days shape (see load_forecast.blend_weekday_baseline).
+        """
         from homeassistant.components.recorder.statistics import (
             statistics_during_period,
         )
 
+        from .load_forecast import blend_weekday_baseline, quarter_bucket
+
         entity_id = str(self._option("load_power_entity"))
+        days = int(self._option("load_history_days"))
         rows = (
             await self.hass.async_add_executor_job(
                 statistics_during_period,
                 self.hass,
-                now - timedelta(days=7),
+                now - timedelta(days=days),
                 now,
                 {entity_id},
                 "5minute",
@@ -164,8 +174,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
                 {"mean"},
             )
         ).get(entity_id, [])
-        sums: dict[int, float] = {}
-        counts: dict[int, int] = {}
+        samples: list[tuple[int, int, float]] = []
         for row in rows:
             mean = row.get("mean")
             if mean is None:
@@ -174,12 +183,13 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             if isinstance(start, (int, float)):
                 start = datetime.fromtimestamp(start, tz=now.tzinfo)
             local = start.astimezone(now.tzinfo)
-            bucket = (local.hour * 60 + (local.minute // PERIOD_MINUTES) * PERIOD_MINUTES)
-            sums[bucket] = sums.get(bucket, 0.0) + float(mean)
-            counts[bucket] = counts.get(bucket, 0) + 1
+            samples.append(
+                (local.weekday(), quarter_bucket(local.hour, local.minute), float(mean))
+            )
+        blended_w = blend_weekday_baseline(samples)
         return {
-            bucket: (sums[bucket] / counts[bucket]) / 1000.0 * (PERIOD_MINUTES / 60.0)
-            for bucket in sums
+            key: value / 1000.0 * (PERIOD_MINUTES / 60.0)
+            for key, value in blended_w.items()
         }
 
     def _expected_daily_kwh(self, temp_c: float) -> float:
@@ -251,6 +261,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
                 )
         info = {
             "scale": round(scale, 3),
+            "history_days": int(self._option("load_history_days")),
             "outdoor_mean_7d": round(t_recent, 1) if t_recent is not None else None,
             "forecast_mean_24h": round(t_forecast, 1) if t_forecast is not None else None,
         }
@@ -363,7 +374,12 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         periods = []
         for index, price_period in enumerate(pricing.periods):
             local = price_period.start.astimezone(now.tzinfo)
-            bucket = local.hour * 60 + (local.minute // PERIOD_MINUTES) * PERIOD_MINUTES
+            # keyed by the period's OWN weekday: tomorrow gets tomorrow's
+            # shape, not today's (the old flat key silently reused today)
+            bucket = (
+                local.weekday(),
+                local.hour * 60 + (local.minute // PERIOD_MINUTES) * PERIOD_MINUTES,
+            )
             periods.append(
                 Period(
                     start=price_period.start,

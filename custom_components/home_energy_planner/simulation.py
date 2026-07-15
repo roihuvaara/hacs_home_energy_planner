@@ -21,9 +21,12 @@ from .coordinator import PricingCoordinator
 from .milp_core import solve_best
 
 
-def _quarter_bucket(ts: datetime, tz) -> int:
+def _quarter_bucket(ts: datetime, tz) -> tuple[int, int]:
     local = ts.astimezone(tz)
-    return local.hour * 60 + (local.minute // PERIOD_MINUTES) * PERIOD_MINUTES
+    return (
+        local.weekday(),
+        local.hour * 60 + (local.minute // PERIOD_MINUTES) * PERIOD_MINUTES,
+    )
 
 
 def _override_series(value: Any, count: int, name: str) -> list[float] | None:

@@ -122,49 +122,18 @@ class WaterHeaterResult:
     price_delta: float  # current - median
 
 
-def _median(ordered: list[float]) -> float:
-    count = len(ordered)
-    middle = count // 2
-    if count % 2:
-        return ordered[middle]
-    return (ordered[middle - 1] + ordered[middle]) / 2.0
-
-
 def plan_cheap_windows(
     prices: list[float], config: WaterHeaterConfig
 ) -> list[tuple[int, int]]:
-    """Cheapest non-overlapping min-run windows within the boosting budget.
+    """Cheapest ranked windows within the boosting budget (shared helper)."""
+    from .price_windows import plan_cheap_windows as ranked
 
-    Greedy by window average price; a window qualifies only when its
-    average sits `cheap_margin_cents` below the day median, so a flat
-    day yields no windows at all.
-    """
-    run = config.min_run_quarters
-    if len(prices) < run:
-        return []
-    median = _median(sorted(prices))
-    means = [
-        (sum(prices[i : i + run]) / run, i) for i in range(len(prices) - run + 1)
-    ]
-    chosen: list[tuple[int, int]] = []
-    budget = config.cheap_quarters
-    for mean, start in sorted(means):
-        if budget < run or mean > median - config.cheap_margin_cents:
-            break
-        end = start + run
-        if any(start < c_end and c_start < end for c_start, c_end in chosen):
-            continue
-        chosen.append((start, end))
-        budget -= run
-    # merge adjacent picks into longer runs
-    chosen.sort()
-    merged: list[tuple[int, int]] = []
-    for start, end in chosen:
-        if merged and start == merged[-1][1]:
-            merged[-1] = (merged[-1][0], end)
-        else:
-            merged.append((start, end))
-    return merged
+    return ranked(
+        prices,
+        min_run_quarters=config.min_run_quarters,
+        budget_quarters=config.cheap_quarters,
+        margin_cents=config.cheap_margin_cents,
+    )
 
 
 def compute_water_heater_mode(
@@ -179,7 +148,9 @@ def compute_water_heater_mode(
     )
 
     window = inputs.future_all_in[: config.price_window_quarters]
-    median = _median(sorted(window)) if window else 0.0
+    from .price_windows import median as _price_median
+
+    median = _price_median(window) if window else 0.0
     current = window[0] if window else 0.0
     delta = current - median
     usable = len(window) >= 8

@@ -35,6 +35,11 @@ class IlpConfig:
     surplus_export_w: float = 500.0
     hot_day_outdoor_max: float = 25.0  # forecast max that marks a hot day
     price_window_quarters: int = 96
+    # "cheap" = inside a ranked cheapest window, not merely the cheaper
+    # half of the day (the old median split marked ~12 h/day as cheap)
+    cheap_quarters: int = 16  # ~4 h opportunistic budget per day
+    cheap_min_run_quarters: int = 2  # ILP responds fast; no long min-run
+    cheap_margin_cents: float = 1.0
     # humidity comfort (living-room Aqara): cooling already dehumidifies,
     # so dry only runs when temperature does not call for cooling.
     # Band fitted to the household's revealed preference (2026-07-06,
@@ -94,12 +99,24 @@ def compute_ilp_action(
 ) -> IlpResult:
     config = config or IlpConfig()
 
+    from .price_windows import plan_cheap_windows
+
     window = inputs.future_all_in[: config.price_window_quarters]
     median = _median(window) if window else 0.0
     current = window[0] if window else 0.0
     delta = current - median
     surplus = inputs.grid_export_w >= config.surplus_export_w
-    cheap = bool(window) and delta <= 0.0
+    windows = (
+        plan_cheap_windows(
+            window,
+            min_run_quarters=config.cheap_min_run_quarters,
+            budget_quarters=config.cheap_quarters,
+            margin_cents=config.cheap_margin_cents,
+        )
+        if len(window) >= 8
+        else []
+    )
+    cheap = any(start == 0 for start, _end in windows)
     hot_day = (
         inputs.outdoor_forecast_max_24h is not None
         and inputs.outdoor_forecast_max_24h >= config.hot_day_outdoor_max
