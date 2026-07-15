@@ -15,7 +15,16 @@ small, bounded threshold adjustments:
   it happened in, and a 15 C day in July never borrows November's
   preferences. Calendar features are deliberately absent — an unusually
   warm November should behave like October, not like last November;
-- a gentle 2-year half-life retires habits that genuinely changed;
+- evidence primarily ages by being *contradicted*, not by the clock:
+  each event is discounted by the similarity-weighted count of newer
+  opposite-direction events on the same parameter (two similar-context
+  contradictions halve it). Consistent winters therefore accumulate
+  undiminished, a changed preference flips after a few counter-events
+  instead of one-per-stale-event, and a summer contradiction cannot
+  retire winter evidence. Silence in similar conditions is consent:
+  the planner applies the offset and the user isn't fighting it;
+- a gentle 2-year calendar half-life remains as the backstop for
+  change that never generates counter-events (household turnover);
   events recorded before feature capture existed keep the legacy
   30-day half-life (age is all we know about them);
 - the folded sum is clipped to a hard cap per parameter, so learning
@@ -38,8 +47,10 @@ from datetime import date, datetime, timedelta
 # holds several years of events; the store is a small JSON blob
 RING_CAP = 1000
 DEDUPE_HOURS = 6.0
-HALF_LIFE_DAYS = 730.0  # resemblance does the real work; age only retires
+HALF_LIFE_DAYS = 730.0  # slow backstop; contradiction does the retiring
 LEGACY_HALF_LIFE_DAYS = 30.0  # events without weather features
+# similar-context contradictions needed to halve an old event's weight
+CONTRADICTION_HALF_COUNT = 2.0
 VALUE_TOLERANCE = 0.11
 
 # weather-state kernel: per-feature Gaussian bandwidths. Only these three
@@ -241,6 +252,42 @@ def _ilp_step(event: PreferenceEvent) -> dict[str, float]:
     return steps
 
 
+def _steps_for(event: PreferenceEvent) -> dict[str, float]:
+    if event.module == MODULE_CLIMATE:
+        return _climate_step(event)
+    if event.module == MODULE_ILP:
+        return _ilp_step(event)
+    if event.module == MODULE_WATER_HEATER:
+        return _water_step(event)
+    return {}  # log-only modules (climate_hvac)
+
+
+def _contradiction_counts(
+    prepared: list[tuple[PreferenceEvent, dict[str, float]]],
+) -> list[float]:
+    """Similarity-weighted count of NEWER opposite-direction events per
+    event (``prepared`` is chronological — the log appends in time order).
+    Same-direction events never discount (confirmation preserves);
+    a dissimilar-context contradiction barely counts (summer cannot
+    retire winter). Featureless pairs count fully — pre-capture events
+    are suspect and should yield quickly. Pairwise per shared parameter:
+    fine at the household event rate (dedupe caps density; even a
+    hundred events on one key is ~10k kernel evaluations)."""
+    counts = [0.0] * len(prepared)
+    for i, (older, steps_old) in enumerate(prepared):
+        for j in range(i + 1, len(prepared)):
+            newer, steps_new = prepared[j]
+            opposed = any(
+                key in steps_new and steps_new[key] * step < 0
+                for key, step in steps_old.items()
+            )
+            if not opposed:
+                continue
+            sim = similarity(older.context, newer.context)
+            counts[i] += 1.0 if sim is None else sim
+    return counts
+
+
 def derive_adjustments(
     events: list[PreferenceEvent],
     now: datetime,
@@ -251,17 +298,15 @@ def derive_adjustments(
     weather-state features; without it, folding is age-only. Keys are
     always all of CAPS, zeros included, so the published `learned`
     attribute has a stable shape."""
+    prepared = [
+        (event, steps) for event in events if (steps := _steps_for(event))
+    ]
+    contradictions = _contradiction_counts(prepared)
     sums = {key: 0.0 for key in CAPS}
-    for event in events:
-        if event.module == MODULE_CLIMATE:
-            steps = _climate_step(event)
-        elif event.module == MODULE_ILP:
-            steps = _ilp_step(event)
-        elif event.module == MODULE_WATER_HEATER:
-            steps = _water_step(event)
-        else:
-            continue  # log-only modules (climate_hvac)
-        weight = _weight(event, now, now_context)
+    for (event, steps), contradicted in zip(prepared, contradictions):
+        weight = _weight(event, now, now_context) * math.pow(
+            0.5, contradicted / CONTRADICTION_HALF_COUNT
+        )
         for key, step in steps.items():
             sums[key] += step * weight
     return {

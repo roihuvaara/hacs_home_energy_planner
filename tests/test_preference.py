@@ -89,10 +89,15 @@ def test_climate_target_steps_are_signed_and_magnitude_blind():
     assert derive_adjustments([cooler], NOW)["climate_target_offset"] == -0.1
 
 
-def test_opposite_events_cancel():
+def test_opposite_events_mostly_cancel_newer_wins_ties():
+    # contradiction discounting means the newer event outweighs the
+    # older one it contradicts — near-cancellation, leaning recent
     warmer = event(module="climate", planner=23.0, manual=25.0)
-    cooler = event(module="climate", planner=24.0, manual=22.0)
-    assert derive_adjustments([warmer, cooler], NOW)["climate_target_offset"] == 0.0
+    cooler = event(module="climate", planner=24.0, manual=22.0, when=NOW + timedelta(hours=1))
+    offset = derive_adjustments([warmer, cooler], NOW + timedelta(hours=1))[
+        "climate_target_offset"
+    ]
+    assert -0.05 <= offset <= 0.0
 
 
 def test_adjustments_are_capped():
@@ -253,3 +258,74 @@ def test_pre_capture_events_keep_the_legacy_fast_fade():
     )
     result = derive_adjustments([legacy], NOW, dict(WINTER))
     assert result["climate_target_offset"] == 0.0
+
+
+# --- blended supersession decay: contradiction retires, confirmation keeps ------
+
+
+def test_preference_flip_needs_few_counter_events_not_one_per_stale():
+    # 6 winters-old "warmer" votes; the household changes its mind.
+    # Pure signed summing would need 7 counter-events to flip; with
+    # contradiction discounting 3 recent "cooler" events suffice.
+    old_warmer = [
+        event(
+            module="climate", planner=22.0, manual=23.0,
+            when=NOW - timedelta(days=30 + i), **WINTER,
+        )
+        for i in range(6)
+    ]
+    new_cooler = [
+        event(
+            module="climate", planner=23.0, manual=22.0,
+            when=NOW - timedelta(days=i), **WINTER,
+        )
+        for i in range(3)
+    ]
+    offset = derive_adjustments(old_warmer + new_cooler, NOW, dict(WINTER))[
+        "climate_target_offset"
+    ]
+    assert offset <= 0.0, offset
+
+
+def test_confirmation_never_discounts():
+    # two same-direction winter events a year apart: both count in full
+    # (no supersession between agreeing evidence)
+    confirmed = [
+        event(
+            module="climate", planner=22.0, manual=23.0,
+            when=NOW - timedelta(days=365), **WINTER,
+        ),
+        event(
+            module="climate", planner=22.0, manual=23.0,
+            when=NOW - timedelta(days=1), **WINTER,
+        ),
+    ]
+    offset = derive_adjustments(confirmed, NOW, dict(WINTER))["climate_target_offset"]
+    # ~0.1 (fresh) + ~0.07 (one year of calendar backstop): no contradiction loss
+    assert offset >= 0.15
+
+
+def test_summer_contradiction_cannot_retire_winter_evidence():
+    winter_warmer = [
+        event(
+            module="climate", planner=22.0, manual=23.0,
+            when=NOW - timedelta(days=200 + i), **WINTER,
+        )
+        for i in range(4)
+    ]
+    summer_cooler = [
+        event(
+            module="climate", planner=24.0, manual=23.0,
+            when=NOW - timedelta(days=i), **JULY_15C,
+        )
+        for i in range(3)
+    ]
+    with_summer = derive_adjustments(
+        winter_warmer + summer_cooler, NOW, dict(WINTER)
+    )["climate_target_offset"]
+    without_summer = derive_adjustments(winter_warmer, NOW, dict(WINTER))[
+        "climate_target_offset"
+    ]
+    # querying in winter: the dissimilar summer contradictions barely
+    # dent the winter evidence (the summer events themselves weigh ~0)
+    assert with_summer >= without_summer * 0.9
