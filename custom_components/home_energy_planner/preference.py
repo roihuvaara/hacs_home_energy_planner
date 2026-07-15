@@ -9,7 +9,15 @@ small, bounded threshold adjustments:
   (magnitude of the user's change is deliberately ignored — robust to
   one-off extremes);
 - opposite events cancel;
-- events fade with a 30-day half-life so old habits stop steering;
+- events are weighted by *resemblance to now* (weather-state kernel:
+  outdoor temp, 7-day trailing mean, daylight hours), so a cold-snap
+  override resurfaces in the next cold snap regardless of which winter
+  it happened in, and a 15 C day in July never borrows November's
+  preferences. Calendar features are deliberately absent — an unusually
+  warm November should behave like October, not like last November;
+- a gentle 2-year half-life retires habits that genuinely changed;
+  events recorded before feature capture existed keep the legacy
+  30-day half-life (age is all we know about them);
 - the folded sum is clipped to a hard cap per parameter, so learning
   can trim a threshold but never walk it somewhere absurd.
 
@@ -24,12 +32,55 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
-RING_CAP = 200
+# multi-season memory: at the household override rate (~1-2/week) this
+# holds several years of events; the store is a small JSON blob
+RING_CAP = 1000
 DEDUPE_HOURS = 6.0
-HALF_LIFE_DAYS = 30.0
+HALF_LIFE_DAYS = 730.0  # resemblance does the real work; age only retires
+LEGACY_HALF_LIFE_DAYS = 30.0  # events without weather features
 VALUE_TOLERANCE = 0.11
+
+# weather-state kernel: per-feature Gaussian bandwidths. Only these three
+# steer the weighting today; the context deliberately records MORE
+# (30-day mean, trends, condition, solar) because history cannot be
+# retrofitted — widen this dict when the data earns a new feature.
+FEATURE_BANDWIDTHS = {
+    "outdoor_temp": 4.0,
+    "outdoor_mean_7d": 4.0,
+    "daylight_hours": 2.5,
+}
+
+
+def daylight_hours(latitude_deg: float, day: date) -> float:
+    """Approximate daylight length in hours (standard declination formula).
+
+    Good to ~15 min at Finnish latitudes; clamped for polar day/night.
+    """
+    n = day.timetuple().tm_yday
+    decl = math.radians(23.45) * math.sin(2.0 * math.pi * (284 + n) / 365.0)
+    lat = math.radians(latitude_deg)
+    cos_h = -math.tan(lat) * math.tan(decl)
+    if cos_h <= -1.0:
+        return 24.0
+    if cos_h >= 1.0:
+        return 0.0
+    return 2.0 * math.degrees(math.acos(cos_h)) / 15.0
+
+
+def similarity(event_context: dict, now_context: dict) -> float | None:
+    """Product of per-feature Gaussian kernels; None when the event has
+    no usable features (recorded before capture existed)."""
+    weight = 1.0
+    used = False
+    for key, bandwidth in FEATURE_BANDWIDTHS.items():
+        a = event_context.get(key)
+        b = now_context.get(key)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            weight *= math.exp(-(((float(a) - float(b)) / bandwidth) ** 2))
+            used = True
+    return weight if used else None
 
 # adjustment key -> hard cap (offset is always within [-cap, +cap])
 CAPS = {
@@ -129,9 +180,16 @@ class PreferenceLog:
         return cls(events)
 
 
-def _weight(event: PreferenceEvent, now: datetime) -> float:
+def _weight(
+    event: PreferenceEvent, now: datetime, now_context: dict | None
+) -> float:
     age_days = max(0.0, (now - event.when).total_seconds() / 86400.0)
-    return math.pow(0.5, age_days / HALF_LIFE_DAYS)
+    sim = similarity(event.context, now_context) if now_context else None
+    if sim is None:
+        # no features on the event (or no live context): age-only with the
+        # legacy fast fade, so pre-capture events cannot leak across seasons
+        return math.pow(0.5, age_days / LEGACY_HALF_LIFE_DAYS)
+    return math.pow(0.5, age_days / HALF_LIFE_DAYS) * sim
 
 
 def _climate_step(event: PreferenceEvent) -> dict[str, float]:
@@ -184,11 +242,15 @@ def _ilp_step(event: PreferenceEvent) -> dict[str, float]:
 
 
 def derive_adjustments(
-    events: list[PreferenceEvent], now: datetime
+    events: list[PreferenceEvent],
+    now: datetime,
+    now_context: dict | None = None,
 ) -> dict[str, float]:
     """Fold the event log into bounded parameter offsets (see module
-    docstring for the mechanics). Keys are always all of CAPS, zeros
-    included, so the published `learned` attribute has a stable shape."""
+    docstring for the mechanics). ``now_context`` carries the current
+    weather-state features; without it, folding is age-only. Keys are
+    always all of CAPS, zeros included, so the published `learned`
+    attribute has a stable shape."""
     sums = {key: 0.0 for key in CAPS}
     for event in events:
         if event.module == MODULE_CLIMATE:
@@ -199,7 +261,7 @@ def derive_adjustments(
             steps = _water_step(event)
         else:
             continue  # log-only modules (climate_hvac)
-        weight = _weight(event, now)
+        weight = _weight(event, now, now_context)
         for key, step in steps.items():
             sums[key] += step * weight
     return {

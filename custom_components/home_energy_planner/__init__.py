@@ -22,8 +22,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .preference_store import PreferenceStore
     from .water_heater_coordinator import WaterHeaterCoordinator
 
-    preferences = PreferenceStore(hass, entry.entry_id)
+    preferences = PreferenceStore(hass, entry)
     await preferences.async_load()
+    preferences.async_schedule_context_refresh()
 
     battery = BatteryCoordinator(hass, entry, coordinator)
     if battery.mode != MODE_OFF:

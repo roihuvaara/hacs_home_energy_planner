@@ -168,3 +168,88 @@ def test_water_heater_overrides_learn_per_weekday():
         for i in range(12)
     ]
     assert derive_adjustments(many, NOW)[key] <= 6.0
+
+
+# --- weather-state kernel: seasonal memory --------------------------------------
+
+from home_energy_planner.preference import daylight_hours, similarity  # noqa: E402
+
+# Koti is at ~61N: July ~19 h light, November ~6.5 h
+JULY_15C = {"outdoor_temp": 15.0, "outdoor_mean_7d": 18.0, "daylight_hours": 19.0}
+NOVEMBER_15C = {"outdoor_temp": 15.0, "outdoor_mean_7d": 4.0, "daylight_hours": 6.5}
+WINTER = {"outdoor_temp": -5.0, "outdoor_mean_7d": -6.0, "daylight_hours": 6.0}
+
+
+def test_daylight_hours_at_finnish_latitude():
+    from datetime import date
+
+    lat = 61.5
+    assert daylight_hours(lat, date(2026, 6, 21)) > 18.0
+    assert daylight_hours(lat, date(2026, 12, 21)) < 6.5
+    assert abs(daylight_hours(lat, date(2026, 3, 20)) - 12.0) < 0.8
+    # polar clamps
+    assert daylight_hours(70.0, date(2026, 6, 21)) == 24.0
+    assert daylight_hours(70.0, date(2026, 12, 21)) == 0.0
+
+
+def test_same_temperature_different_season_is_dissimilar():
+    # the owner's case: a 15 C day in July must not borrow November's
+    # preferences even though the instantaneous temperature matches
+    assert similarity(JULY_15C, dict(JULY_15C)) > 0.99
+    assert similarity(NOVEMBER_15C, dict(JULY_15C)) < 0.01
+    # events without features report None (caller falls back to age-only)
+    assert similarity({}, dict(JULY_15C)) is None
+
+
+def test_winter_preferences_resurface_next_winter():
+    # two winters of "warmer please" events, 1 and 2 years old
+    winter_events = [
+        event(
+            module="climate",
+            planner=22.0,
+            manual=23.0,
+            when=NOW - timedelta(days=365 * years + drift),
+            **WINTER,
+        )
+        for years in (1, 2)
+        for drift in (0, 10, 20)
+    ]
+    in_winter = derive_adjustments(winter_events, NOW, dict(WINTER))
+    in_summer = derive_adjustments(winter_events, NOW, dict(JULY_15C))
+    # both past winters contribute when it is winter again...
+    assert in_winter["climate_target_offset"] >= 0.3
+    # ...and none of it leaks into summer
+    assert in_summer["climate_target_offset"] == 0.0
+
+
+def test_multiple_winters_accumulate_with_gentle_age_decay():
+    one_year = [
+        event(
+            module="climate", planner=22.0, manual=23.0,
+            when=NOW - timedelta(days=365), **WINTER,
+        )
+    ]
+    two_years = [
+        event(
+            module="climate", planner=22.0, manual=23.0,
+            when=NOW - timedelta(days=730), **WINTER,
+        )
+    ]
+    w1 = derive_adjustments(one_year, NOW, dict(WINTER))["climate_target_offset"]
+    w2 = derive_adjustments(two_years, NOW, dict(WINTER))["climate_target_offset"]
+    # older winters still count, at roughly the 2-year half-life
+    assert w1 > w2 > 0.0
+    assert w2 >= 0.05 - 1e-9
+
+
+def test_pre_capture_events_keep_the_legacy_fast_fade():
+    # a featureless event from last summer must not steer this winter
+    # (nor much of anything: 30-day half-life, it is long gone)
+    legacy = event(
+        module="climate",
+        planner=23.0,
+        manual=25.0,
+        when=NOW - timedelta(days=180),
+    )
+    result = derive_adjustments([legacy], NOW, dict(WINTER))
+    assert result["climate_target_offset"] == 0.0
