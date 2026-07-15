@@ -58,6 +58,19 @@ CRITICAL_INPUTS = [
 ]
 
 
+def stale_critical_inputs(get_state, now: datetime) -> list[str]:
+    """Entity ids of critical inputs that are stale per their InputRule."""
+    stale: list[str] = []
+    for rule in CRITICAL_INPUTS:
+        if rule.off_when is not None:
+            gate = get_state(rule.off_when)
+            if gate is not None and gate.state == "off":
+                continue
+        if input_is_stale(get_state(rule.entity_id), now, rule.stale_hours):
+            stale.append(rule.entity_id)
+    return stale
+
+
 def input_is_stale(
     state: Any, now: datetime, stale_hours: float = INPUT_STALE_HOURS
 ) -> bool:
@@ -178,15 +191,7 @@ class PlannerWatchdog:
         # restored states keep pre-restart last_updated until integrations
         # poll, so skip input staleness during the startup grace window
         if now - self._started >= self.STARTUP_GRACE:
-            for rule in CRITICAL_INPUTS:
-                if rule.off_when is not None:
-                    gate = self.hass.states.get(rule.off_when)
-                    if gate is not None and gate.state == "off":
-                        continue
-                if input_is_stale(
-                    self.hass.states.get(rule.entity_id), now, rule.stale_hours
-                ):
-                    stale.append(rule.entity_id)
+            stale = stale_critical_inputs(self.hass.states.get, now)
 
         battery = bundle.get("battery")
         battery_data = getattr(battery, "data", None)

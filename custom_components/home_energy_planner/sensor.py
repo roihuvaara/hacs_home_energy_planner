@@ -519,11 +519,10 @@ class PlannerSummarySensor(CoordinatorEntity[PricingCoordinator], SensorEntity):
 
         from .watchdog import (
             APPLY_FAILING_HOURS,
-            CRITICAL_INPUTS,
             ENGINE_FALLBACK_HOURS,
             WatchdogSnapshot,
             evaluate_issues,
-            input_is_stale,
+            stale_critical_inputs,
         )
 
         pdata = self.coordinator.data
@@ -536,11 +535,7 @@ class PlannerSummarySensor(CoordinatorEntity[PricingCoordinator], SensorEntity):
         watchdog = bundle.get("watchdog")
         started = getattr(watchdog, "_started", None)
         in_grace = started is not None and (now - started) < timedelta(minutes=15)
-        stale = (
-            []
-            if in_grace
-            else [e for e in CRITICAL_INPUTS if input_is_stale(self._hass.states.get(e), now)]
-        )
+        stale = [] if in_grace else stale_critical_inputs(self._hass.states.get, now)
 
         battery = bundle.get("battery")
         bd = getattr(battery, "data", None)

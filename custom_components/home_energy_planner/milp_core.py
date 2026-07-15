@@ -65,7 +65,11 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
     surplus = [max(0.0, p.solar_kwh - p.load_kwh) for p in periods]
     price = [p.price_cents_per_kwh for p in periods]
     min_price = min(price, default=0.0)
-    terminal_value = max(0.0, DISCHARGE_EFF * min_price)
+    # net of cycle cost (spending the stored energy later pays it too);
+    # epsilon prefers holding on exact ties, matching the DP
+    terminal_value = (
+        max(0.0, DISCHARGE_EFF * (min_price - CYCLE_COST_CENTS_PER_KWH)) + 1e-3
+    )
 
     solver = highspy.Highs()
     solver.silent()
@@ -215,7 +219,9 @@ def solve_joint(
     net_load = [max(0.0, p.load_kwh - p.solar_kwh) for p in periods]
     surplus = [max(0.0, p.solar_kwh - p.load_kwh) for p in periods]
     price = [p.price_cents_per_kwh for p in periods]
-    terminal_value = max(0.0, DISCHARGE_EFF * min(price))
+    terminal_value = (
+        max(0.0, DISCHARGE_EFF * (min(price) - CYCLE_COST_CENTS_PER_KWH)) + 1e-3
+    )
 
     delta_h = 0.25
     tank_kwh_per_quarter = tank.power_kw * delta_h

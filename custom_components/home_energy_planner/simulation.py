@@ -112,7 +112,9 @@ async def async_simulate_plan(
     plan, engine = await hass.async_add_executor_job(
         solve_best, periods, params, str(data.get("engine", "lp"))
     )
-    charge_slots, discharge_slots = compile_slots(plan.periods, params)
+    charge_slots, discharge_slots = compile_slots(
+        plan.periods, params, now=dt_util.now()
+    )
 
     return {
         "summary": {

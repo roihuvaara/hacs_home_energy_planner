@@ -126,8 +126,18 @@ def solve(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
     # horizon's cheapest price. Without it the solver dumps the battery at
     # any price above cycle cost near the horizon end; anything above the
     # minimum price would instead reward charging purely to bank credit.
+    # Using that stored energy later still pays the cycle cost, so it is
+    # netted out here — crediting the raw min price made hoarding beat
+    # discharging at any in-horizon price below min + cycle (seen live
+    # 2026-07-15: full battery held through the evening peak forever).
+    # the 1e-3 epsilon prefers holding on exact ties (flat prices make
+    # discharge-now vs terminal-credit exactly equal): conservative for
+    # unknown post-horizon prices, and it keeps the DP and LP tie-breaks
+    # aligned instead of diverging within the quantization band
     min_price = min((p.price_cents_per_kwh for p in periods), default=0.0)
-    terminal_value = max(0.0, DISCHARGE_EFF * min_price)
+    terminal_value = (
+        max(0.0, DISCHARGE_EFF * (min_price - CYCLE_COST_CENTS_PER_KWH)) + 1e-3
+    )
     # dp[t][s]: minimal future cost from period t at buffer state s
     dp = [[inf] * (max_units + 1) for _ in range(n)] + [
         [-s * STATE_STEP_KWH * terminal_value for s in range(max_units + 1)]
@@ -253,6 +263,7 @@ def compile_slots(
     plans: list[PeriodPlan],
     battery: BatteryParams,
     max_slots: int = 6,
+    now: datetime | None = None,
 ) -> tuple[list[SlotSpec], list[SlotSpec]]:
     """Compile the period plan into non-overlapping Solis slot tables.
 
@@ -261,11 +272,37 @@ def compile_slots(
     by value and dropped (never truncated) when they exceed 6 per side or
     would collide wall-clock with a higher-value window on the other side —
     Solis slots recur daily, so cross-side overlap is a real conflict.
+
+    ``now`` (tz-aware planner local time) enables device-reality handling,
+    both bugs seen live 2026-07-15:
+    - slot times are rendered in ``now``'s timezone — the inverter runs
+      local wall clock, a UTC-formatted window is shifted 3 h;
+    - daily recurrence gating: a window is only written when its next
+      wall-clock occurrence IS the planned one. Tomorrow evening's hold
+      would otherwise fire tonight too, blocking tonight's planned
+      discharge. Deferred windows get written by a later tick once the
+      colliding occurrence has passed.
     """
+    tz = now.tzinfo if now is not None else None
+
+    def local(moment: datetime) -> datetime:
+        return moment.astimezone(tz) if tz is not None else moment
+
+    def next_occurrence_is_planned(window: list[PeriodPlan]) -> bool:
+        if now is None:
+            return True
+        intended = local(window[0].start)
+        duration = timedelta(minutes=PERIOD_MINUTES * len(window))
+        occurrence = now.replace(
+            hour=intended.hour, minute=intended.minute, second=0, microsecond=0
+        )
+        if occurrence + duration <= now:
+            occurrence += timedelta(days=1)
+        return abs((occurrence - intended).total_seconds()) < 60
 
     def to_slot(window: list[PeriodPlan], action: Action) -> SlotSpec:
-        start = window[0].start
-        end = window[-1].start + timedelta(minutes=PERIOD_MINUTES)
+        start = local(window[0].start)
+        end = local(window[-1].start + timedelta(minutes=PERIOD_MINUTES))
         time = f"{start:%H:%M}-{end:%H:%M}"
         if action == "charge":
             energy = sum(p.grid_charge_kwh for p in window)
@@ -289,6 +326,8 @@ def compile_slots(
                 max(max(p.buffer_start_kwh, p.buffer_end_kwh) for p in window)
                 < MIN_HOLD_BUFFER_KWH
             ):
+                continue
+            if not next_occurrence_is_planned(window):
                 continue
             candidates.append(
                 (

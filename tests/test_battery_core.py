@@ -123,3 +123,59 @@ def test_hold_windows_protect_before_expensive():
     assert sum(p.discharge_to_load_kwh for p in cheap) == 0
     charge, discharge = compile_slots(plan.periods, battery(soc=80.0))
     assert any(s.enabled for s in discharge)
+
+
+# --- compile_slots device-reality handling (live bugs 2026-07-15) ------------
+
+from home_energy_planner.battery_core import PeriodPlan  # noqa: E402
+
+UTC = ZoneInfo("UTC")
+
+
+def hold_plans(start_utc, quarters, price=8.0, buffer_kwh=1.0):
+    return [
+        PeriodPlan(
+            start=start_utc + timedelta(minutes=15 * i),
+            action="hold",
+            buffer_start_kwh=buffer_kwh,
+            buffer_end_kwh=buffer_kwh,
+            grid_charge_kwh=0.0,
+            discharge_to_load_kwh=0.0,
+            grid_import_kwh=0.3,
+            price_cents_per_kwh=price,
+        )
+        for i in range(quarters)
+    ]
+
+
+def test_compile_slots_renders_local_wall_clock():
+    # periods carry UTC datetimes; the inverter runs local wall clock.
+    # 19:00 UTC = 22:00 Helsinki — the written window must say 22:00.
+    plans = hold_plans(datetime(2026, 7, 15, 19, 0, tzinfo=UTC), 8)
+    now = datetime(2026, 7, 15, 19, 40, tzinfo=TZ)
+    _charge, discharge = compile_slots(plans, battery(soc=40.0), now=now)
+    enabled = [s for s in discharge if s.enabled]
+    assert [s.time for s in enabled] == ["22:00-00:00"]
+
+
+def test_compile_slots_defers_window_whose_wall_clock_fires_early():
+    # hold intended TOMORROW 18:15-01:00 local; Solis slots recur daily, so
+    # written today it would also fire tonight, fighting tonight's plan.
+    plans = hold_plans(datetime(2026, 7, 16, 15, 15, tzinfo=UTC), 27)
+    tonight = datetime(2026, 7, 15, 19, 40, tzinfo=TZ)
+    _charge, discharge = compile_slots(plans, battery(soc=40.0), now=tonight)
+    assert not any(s.enabled for s in discharge)
+
+    # once today's colliding occurrence has passed, the window is written
+    after_midnight = datetime(2026, 7, 16, 2, 0, tzinfo=TZ)
+    _charge, discharge = compile_slots(
+        plans, battery(soc=40.0), now=after_midnight
+    )
+    enabled = [s for s in discharge if s.enabled]
+    assert [s.time for s in enabled] == ["18:15-01:00"]
+
+
+def test_compile_slots_without_now_keeps_legacy_behaviour():
+    plans = hold_plans(datetime(2026, 7, 16, 15, 15, tzinfo=UTC), 27)
+    _charge, discharge = compile_slots(plans, battery(soc=40.0))
+    assert any(s.enabled for s in discharge)

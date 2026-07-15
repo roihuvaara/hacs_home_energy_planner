@@ -346,7 +346,9 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         plan, engine = await self.hass.async_add_executor_job(
             solve_best, periods, battery, str(self._option("battery_engine"))
         )
-        charge_slots, discharge_slots = compile_slots(plan.periods, battery)
+        charge_slots, discharge_slots = compile_slots(
+            plan.periods, battery, now=dt_util.now()
+        )
 
         # joint battery+tank MILP runs as an observe artifact alongside the
         # rule-based water heater module; its windows publish for the gate

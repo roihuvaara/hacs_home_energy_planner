@@ -148,13 +148,15 @@ def test_flat_summer_day_soaks_solar_without_grid_cycling():
 # --- cheap two-day stretch: spread below cycle cost, stay idle --------------
 
 
-def test_cheap_two_day_stretch_does_not_cycle():
+def test_cheap_two_day_stretch_does_not_grid_charge():
+    # spread (2 c) below cycle cost (4 c): no grid-charge round trips.
+    # Pre-stored energy may drain at the local 5-6 c peaks (positive net
+    # after cycle cost), but nothing is bought to be re-sold.
     hourly = ([4.0, 4.0, 5.0, 5.0, 6.0, 6.0, 5.0, 5.0] * 3) * 2  # 48 h
     load = [0.5] * 48
     plan = solve(day_periods(hourly, load), battery(soc=50.0))
     assert charged(plan.periods) == 0
-    assert discharged(plan.periods) == 0
-    assert abs(plan.total_cost_cents - plan.baseline_cost_cents) < 0.5
+    assert plan.total_cost_cents <= plan.baseline_cost_cents + 0.01
 
 
 # --- sunny vs cloudy: solar displaces grid charging -------------------------
@@ -192,3 +194,14 @@ def test_all_scenarios_compile_without_cross_side_overlap():
         charge, discharge = compile_slots(plan.periods, params)
         assert find_cross_side_overlaps(charge, discharge) == []
         assert len(charge) == 6 and len(discharge) == 6
+
+
+def test_full_battery_serves_evening_peak_instead_of_hoarding():
+    # live incident 2026-07-15: min price 5.9 within cycle-cost distance of
+    # the 8.5 c evening — the old terminal (min price, cycle cost ignored)
+    # made hoarding a full battery beat discharging at ANY in-horizon price
+    prices = [8.5] * 6 + [9.0] * 6 + [8.5] * 6 + [6.0] * 6  # min 6.0, peak 9
+    load = [0.4] * 24
+    plan = solve(day_periods(prices, load), battery(soc=100.0))
+    assert discharged(plan.periods) >= 2.0
+    assert plan.end_soc_pct < 50.0
