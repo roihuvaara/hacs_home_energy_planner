@@ -336,6 +336,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
                     price_cents_per_kwh=price_period.all_in_cents_per_kwh,
                     load_kwh=load_by_quarter.get(bucket, 0.15),
                     solar_kwh=solar[index],
+                    export_cents_per_kwh=price_period.export_cents_per_kwh,
                 )
             )
 

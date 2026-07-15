@@ -41,6 +41,7 @@ from .const import (
 from .pricing import (
     PERIOD_MINUTES,
     Contract,
+    ExportContract,
     PricePeriod,
     PricingConfig,
     RawSlot,
@@ -136,6 +137,34 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
             ]
         except (ValueError, KeyError, TypeError) as err:
             _LOGGER.error("Invalid contracts_json ignored: %s", err)
+            return []
+
+    def export_contracts(self) -> list[ExportContract]:
+        """Parse the export_contracts_json option.
+
+        Format: JSON list of {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD",
+        "type": "spot"|"spot_minus_margin"|"fixed", "margin_cents": float,
+        "price_cents": float}. Empty/absent = plain spot for all dates.
+        """
+        import json
+
+        raw = str(self._option("export_contracts_json", "") or "").strip()
+        if not raw:
+            return []
+        try:
+            entries = json.loads(raw)
+            return [
+                ExportContract(
+                    start=date.fromisoformat(str(entry["start"])),
+                    end=date.fromisoformat(str(entry["end"])),
+                    type=str(entry["type"]),
+                    margin_cents=float(entry.get("margin_cents", 0.0)),
+                    price_cents=float(entry.get("price_cents", 0.0)),
+                )
+                for entry in entries
+            ]
+        except (ValueError, KeyError, TypeError) as err:
+            _LOGGER.error("Invalid export_contracts_json ignored: %s", err)
             return []
 
     def _nordpool_entry_id(self) -> str:
@@ -239,6 +268,7 @@ class PricingCoordinator(DataUpdateCoordinator[PricingData]):
             config=self.pricing_config(),
             local_tz=dt_util.get_default_time_zone(),
             contracts=self.contracts(),
+            export_contracts=self.export_contracts(),
         )
         if not periods:
             raise UpdateFailed("Price horizon is empty")

@@ -63,6 +63,47 @@ def contract_for(contracts: list[Contract], day: date) -> Contract | None:
 
 
 @dataclass(frozen=True)
+class ExportContract:
+    """A date-ranged export compensation contract.
+
+    Types:
+    - "spot": raw Nord Pool spot, no deduction (the owner's current deal)
+    - "spot_minus_margin": raw spot minus ``margin_cents``
+    - "fixed": flat ``price_cents`` regardless of spot
+
+    No VAT or transfer applies to export. Values may go negative on
+    negative spot — never clamp; paying to export is what makes battery
+    absorption free money on those quarters. Dates inclusive, local time.
+    """
+
+    start: date
+    end: date
+    type: str  # "spot" | "spot_minus_margin" | "fixed"
+    margin_cents: float = 0.0
+    price_cents: float = 0.0
+
+
+def export_contract_for(
+    contracts: list[ExportContract], day: date
+) -> ExportContract | None:
+    for contract in contracts:
+        if contract.start <= day <= contract.end:
+            return contract
+    return None
+
+
+def export_cents_for(
+    contract: ExportContract | None, raw_cents: float
+) -> float:
+    """Export compensation for one period; plain spot when uncontracted."""
+    if contract is None or contract.type == "spot":
+        return raw_cents
+    if contract.type == "fixed":
+        return contract.price_cents
+    return round(raw_cents - contract.margin_cents, 4)
+
+
+@dataclass(frozen=True)
 class RawSlot:
     """One Nord Pool slot as returned by the provider (EUR/MWh)."""
 
@@ -76,6 +117,8 @@ class PricePeriod:
     raw_cents_per_kwh: float
     vat_cents_per_kwh: float
     all_in_cents_per_kwh: float
+    # export compensation (default: plain spot); no VAT/transfer on export
+    export_cents_per_kwh: float = 0.0
 
 
 def floor_to_period(value: datetime) -> datetime:
@@ -100,6 +143,7 @@ def build_price_horizon(
     config: PricingConfig,
     local_tz: tzinfo,
     contracts: list[Contract] | None = None,
+    export_contracts: list[ExportContract] | None = None,
 ) -> list[PricePeriod]:
     """Compute the forward horizon from the current quarter-hour onward.
 
@@ -113,7 +157,9 @@ def build_price_horizon(
 
     cutoff = floor_to_period(now)
     seen: set[datetime] = set()
-    prepared: list[tuple[datetime, float, float, int, Contract | None]] = []
+    prepared: list[
+        tuple[datetime, float, float, int, Contract | None, ExportContract | None]
+    ] = []
     vat_sum = 0.0
     for slot in sorted(raw_slots, key=lambda item: item.start):
         if slot.start < cutoff or slot.start in seen:
@@ -129,13 +175,16 @@ def build_price_horizon(
                 vat_cents,
                 local.hour,
                 contract_for(contracts, local.date()) if contracts else None,
+                export_contract_for(export_contracts, local.date())
+                if export_contracts
+                else None,
             )
         )
         vat_sum += vat_cents
     mean_vat = vat_sum / len(prepared) if prepared else 0.0
 
     periods: list[PricePeriod] = []
-    for start, raw_cents, vat_cents, local_hour, contract in prepared:
+    for start, raw_cents, vat_cents, local_hour, contract, export in prepared:
         transfer = transfer_cents_for_hour(config, local_hour)
         if contract is None:
             energy = vat_cents + config.margin_cents_per_kwh
@@ -149,6 +198,7 @@ def build_price_horizon(
                 raw_cents_per_kwh=raw_cents,
                 vat_cents_per_kwh=vat_cents,
                 all_in_cents_per_kwh=round(energy + transfer, 4),
+                export_cents_per_kwh=export_cents_for(export, raw_cents),
             )
         )
     return periods

@@ -159,3 +159,70 @@ def test_empty_input_yields_empty_horizon():
         )
         == []
     )
+
+
+# --- export contracts ---------------------------------------------------------
+
+from datetime import date  # noqa: E402
+
+from pricing import ExportContract, export_cents_for, export_contract_for  # noqa: E402
+
+
+def test_export_defaults_to_plain_spot():
+    slots = make_slots(local(2026, 7, 5, 12, 0), 4, price_eur_per_mwh=80.0)
+    periods = build_price_horizon(
+        slots, now=local(2026, 7, 5, 12, 0), config=CONFIG, local_tz=HELSINKI
+    )
+    assert all(p.export_cents_per_kwh == 8.0 for p in periods)
+
+
+def test_export_contract_selected_by_date():
+    contracts = [
+        ExportContract(
+            start=date(2026, 10, 1),
+            end=date(2027, 3, 31),
+            type="spot_minus_margin",
+            margin_cents=0.3,
+        )
+    ]
+    assert export_contract_for(contracts, date(2026, 7, 5)) is None
+    winter = export_contract_for(contracts, date(2026, 12, 1))
+    assert winter is not None and winter.margin_cents == 0.3
+
+
+def test_export_contract_types():
+    spot = ExportContract(date(2026, 1, 1), date(2026, 12, 31), "spot")
+    margin = ExportContract(
+        date(2026, 1, 1), date(2026, 12, 31), "spot_minus_margin", margin_cents=0.5
+    )
+    fixed = ExportContract(
+        date(2026, 1, 1), date(2026, 12, 31), "fixed", price_cents=4.0
+    )
+    assert export_cents_for(None, 8.0) == 8.0
+    assert export_cents_for(spot, 8.0) == 8.0
+    assert export_cents_for(margin, 8.0) == 7.5
+    assert export_cents_for(fixed, 8.0) == 4.0
+    # negative spot flows through unclamped
+    assert export_cents_for(margin, -1.0) == -1.5
+
+
+def test_export_contract_applied_in_horizon():
+    contracts = [
+        ExportContract(
+            start=date(2026, 7, 1),
+            end=date(2026, 7, 31),
+            type="spot_minus_margin",
+            margin_cents=0.3,
+        )
+    ]
+    slots = make_slots(local(2026, 7, 5, 12, 0), 4, price_eur_per_mwh=80.0)
+    periods = build_price_horizon(
+        slots,
+        now=local(2026, 7, 5, 12, 0),
+        config=CONFIG,
+        local_tz=HELSINKI,
+        export_contracts=contracts,
+    )
+    assert all(p.export_cents_per_kwh == 7.7 for p in periods)
+    # import side untouched by the export contract
+    assert all(p.raw_cents_per_kwh == 8.0 for p in periods)

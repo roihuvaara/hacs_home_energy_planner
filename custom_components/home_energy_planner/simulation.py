@@ -68,6 +68,9 @@ async def async_simulate_plan(
             start + timedelta(minutes=PERIOD_MINUTES * index)
             for index in range(len(price_series))
         ]
+        export_series = _override_series(
+            data.get("export_prices"), len(price_series), "export_prices"
+        ) or [0.0] * len(price_series)
     else:
         horizon = pricing.data
         if horizon is None or not horizon.periods:
@@ -76,6 +79,9 @@ async def async_simulate_plan(
             )
         starts = [p.start for p in horizon.periods]
         price_series = [p.all_in_cents_per_kwh for p in horizon.periods]
+        export_series = _override_series(
+            data.get("export_prices"), len(price_series), "export_prices"
+        ) or [p.export_cents_per_kwh for p in horizon.periods]
 
     count = len(starts)
     load_series = _override_series(data.get("load"), count, "load")
@@ -105,8 +111,11 @@ async def async_simulate_plan(
             price_cents_per_kwh=price,
             load_kwh=round(load, 4),
             solar_kwh=round(solar, 4),
+            export_cents_per_kwh=export,
         )
-        for ts, price, load, solar in zip(starts, price_series, load_series, solar_series)
+        for ts, price, load, solar, export in zip(
+            starts, price_series, load_series, solar_series, export_series
+        )
     ]
 
     plan, engine = await hass.async_add_executor_job(
@@ -125,6 +134,7 @@ async def async_simulate_plan(
             "total_cost_cents": plan.total_cost_cents,
             "baseline_cost_cents": plan.baseline_cost_cents,
             "savings_cents": round(plan.baseline_cost_cents - plan.total_cost_cents, 2),
+            "export_revenue_cents": plan.export_revenue_cents,
             "end_soc_pct": plan.end_soc_pct,
             "battery": {
                 "soc_pct": params.soc_pct,
@@ -147,6 +157,7 @@ async def async_simulate_plan(
                 "grid_charge_kwh": p.grid_charge_kwh,
                 "discharge_kwh": p.discharge_to_load_kwh,
                 "grid_import_kwh": p.grid_import_kwh,
+                "export_kwh": p.export_kwh,
                 "buffer_end_kwh": p.buffer_end_kwh,
             }
             for index, p in enumerate(plan.periods)

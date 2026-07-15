@@ -167,6 +167,7 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
                 if p.action != "hold" or p.grid_charge_kwh > 0
             ][:64],
             "last_apply_success": (data.applied or {}).get("success"),
+            "export_revenue_cents": plan.export_revenue_cents,
             # aligned quarter-hour series for dashboard plotting
             "series": {
                 "start": plan.periods[0].start.isoformat() if plan.periods else None,
@@ -183,6 +184,7 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
                 ],
                 "grid_charge_kwh": [p.grid_charge_kwh for p in plan.periods],
                 "discharge_kwh": [p.discharge_to_load_kwh for p in plan.periods],
+                "export_kwh": [p.export_kwh for p in plan.periods],
                 "load_kwh": [p.load_kwh for p in data.input_periods],
                 "solar_kwh": [p.solar_kwh for p in data.input_periods],
             },

@@ -43,7 +43,15 @@ def solve_best(
 
 
 def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
-    """Minimize import + cycle cost; raises ImportError without highspy."""
+    """Minimize import + cycle cost − export revenue; needs highspy.
+
+    Export economics: absorbing surplus pays its forgone export value;
+    unabsorbed surplus earns ``export_cents_per_kwh``. Discharge-to-export
+    is deliberately NOT modeled (``d`` stays capped at net load): with
+    ~0.9 round-trip and 4 c/kWh cycle cost, selling at spot never clears
+    the FI all-in import spread, and the export switch itself is still
+    unprobed (todo 002).
+    """
     import highspy
 
     n = len(periods)
@@ -64,6 +72,7 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
     net_load = [max(0.0, p.load_kwh - p.solar_kwh) for p in periods]
     surplus = [max(0.0, p.solar_kwh - p.load_kwh) for p in periods]
     price = [p.price_cents_per_kwh for p in periods]
+    export = [p.export_cents_per_kwh for p in periods]
     min_price = min(price, default=0.0)
     # net of cycle cost (spending the stored energy later pays it too);
     # epsilon prefers holding on exact ties, matching the DP
@@ -102,9 +111,11 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
         # d*eff of load at price but pays cycle cost on delivered energy
         cost[gi(t)] = price[t] / CHARGE_EFF
         cost[di(t)] = DISCHARGE_EFF * (CYCLE_COST_CENTS_PER_KWH - price[t])
-        # tiny reward for absorbing free surplus so ties resolve like the
-        # DP (which always captures solar) instead of leaving it
-        cost[ai(t)] = -1e-6
+        # absorbing surplus forgoes exporting it (a_t is battery-side, so
+        # a_t/eff of exportable kWh is consumed); the tiny epsilon keeps
+        # zero-export-price ties resolving like the DP (capture solar).
+        # Negative spot flips the sign: absorbing is then paid.
+        cost[ai(t)] = export[t] / CHARGE_EFF - 1e-6
     cost[si(n - 1)] -= terminal_value
 
     solver.addVars(num_vars, lower, upper)
@@ -129,6 +140,7 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
     plans: list[PeriodPlan] = []
     total = 0.0
     baseline = 0.0
+    export_revenue = 0.0
     buffer = start_buffer
     for t, period in enumerate(periods):
         g = max(0.0, values[gi(t)])
@@ -138,8 +150,15 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
         deliver = d * DISCHARGE_EFF
         grid_charge = g / CHARGE_EFF
         grid_import = max(0.0, net_load[t] - deliver) + grid_charge
-        baseline += net_load[t] * price[t]
-        total += grid_import * price[t] + deliver * CYCLE_COST_CENTS_PER_KWH
+        export_kwh = max(0.0, surplus[t] - a / CHARGE_EFF)
+        # baseline = no battery: all load imported, all surplus exported
+        baseline += net_load[t] * price[t] - surplus[t] * export[t]
+        total += (
+            grid_import * price[t]
+            + deliver * CYCLE_COST_CENTS_PER_KWH
+            - export_kwh * export[t]
+        )
+        export_revenue += export_kwh * export[t]
         if g > _EPS:
             action = "charge"
         elif d > _EPS:
@@ -156,6 +175,7 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
                 discharge_to_load_kwh=round(deliver, 3),
                 grid_import_kwh=round(grid_import, 3),
                 price_cents_per_kwh=price[t],
+                export_kwh=round(export_kwh, 3),
             )
         )
         buffer = buffer_end
@@ -165,6 +185,7 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
         total_cost_cents=round(total, 2),
         baseline_cost_cents=round(baseline, 2),
         end_soc_pct=round(battery.soc_from_buffer_kwh(buffer), 1),
+        export_revenue_cents=round(export_revenue, 2),
     )
 
 
@@ -262,7 +283,8 @@ def solve_joint(
         upper[ri(t)] = 1.0
         cost[gi(t)] = price[t] / CHARGE_EFF
         cost[di(t)] = DISCHARGE_EFF * (CYCLE_COST_CENTS_PER_KWH - price[t])
-        cost[ai(t)] = -1e-6
+        # forgone export on absorbed surplus, mirroring solve_lp
+        cost[ai(t)] = periods[t].export_cents_per_kwh / CHARGE_EFF - 1e-6
         cost[ui(t)] = tank_kwh_per_quarter * price[t]
         cost[ri(t)] = tank.per_start_kwh * price[t]
     cost[si(n - 1)] -= terminal_value

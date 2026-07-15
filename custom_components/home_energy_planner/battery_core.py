@@ -4,6 +4,10 @@ The solver is an exact dynamic program over quantized battery energy
 states. For this convex problem size (~140 quarter-hour periods, ~50
 states) it returns the same dispatch an LP would; it exists behind
 ``solve()`` so an LP/MILP engine can replace it without touching callers.
+
+Known divergence: the DP force-absorbs solar surplus and ignores
+``Period.export_cents_per_kwh`` (the LP prices forgone export). It is the
+fallback engine only; the watchdog alarms when the LP is down > 1 h.
 """
 
 from __future__ import annotations
@@ -38,6 +42,9 @@ class Period:
     price_cents_per_kwh: float
     load_kwh: float
     solar_kwh: float
+    # export compensation for surplus not absorbed (LP engine only; the
+    # DP fallback force-absorbs surplus and stays export-blind)
+    export_cents_per_kwh: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -88,6 +95,7 @@ class PeriodPlan:
     discharge_to_load_kwh: float
     grid_import_kwh: float
     price_cents_per_kwh: float
+    export_kwh: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -96,6 +104,7 @@ class DispatchPlan:
     total_cost_cents: float
     baseline_cost_cents: float
     end_soc_pct: float
+    export_revenue_cents: float = 0.0
 
 
 def current_to_period_kwh(current_a: int) -> float:

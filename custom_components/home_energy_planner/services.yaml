@@ -74,6 +74,12 @@ simulate_plan:
       required: false
       selector:
         object:
+    export_prices:
+      name: Export prices
+      description: Export compensation in cents/kWh, a single number or a list. Omit for the live export contract (plain spot by default); with an explicit price series it defaults to 0.
+      required: false
+      selector:
+        object:
     solar:
       name: Solar
       description: Solar kWh per quarter-hour, a single number or a list. Omit for the live forecast series.

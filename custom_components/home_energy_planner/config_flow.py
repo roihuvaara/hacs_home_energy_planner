@@ -93,6 +93,10 @@ def _options_schema(current: dict[str, Any]) -> vol.Schema:
                 "contracts_json", default=_default("contracts_json", "")
             ): str,
             vol.Optional(
+                "export_contracts_json",
+                default=_default("export_contracts_json", ""),
+            ): str,
+            vol.Optional(
                 "versati_cooling", default=_default("versati_cooling", "notify")
             ): vol.In(["off", "notify", "control"]),
             vol.Optional(
