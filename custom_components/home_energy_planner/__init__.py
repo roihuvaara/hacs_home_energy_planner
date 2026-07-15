@@ -37,7 +37,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await climate.async_refresh()
         climate.async_schedule_ticks()
 
-    water_heater = WaterHeaterCoordinator(hass, entry, coordinator, preferences)
+    water_heater = WaterHeaterCoordinator(
+        hass, entry, coordinator, preferences, battery=battery
+    )
     if water_heater.mode != MODE_OFF:
         await water_heater.async_restore_overrides()
         await water_heater.async_refresh()
@@ -125,6 +127,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
             if mode not in ("off", "notify", "control"):
                 raise HomeAssistantError(f"Unknown mode '{mode}'")
             option_key = "versati_cooling"
+        elif module == "water_heater_source":
+            # setpoint source: MILP tank plan vs legacy rules (rollback knob)
+            if mode not in ("rules", "milp"):
+                raise HomeAssistantError(f"Unknown mode '{mode}'")
+            option_key = "water_heater_source"
         elif module in ("battery", "climate", "water_heater", "ilp"):
             if mode not in ("off", "observe", "control"):
                 raise HomeAssistantError(f"Unknown mode '{mode}'")

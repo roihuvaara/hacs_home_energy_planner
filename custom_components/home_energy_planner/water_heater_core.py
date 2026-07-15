@@ -29,6 +29,25 @@ MODE_SOLAR_BOOST = "solar_boost"
 MODE_CHEAP_BOOST = "cheap_boost"
 MODE_NORMAL = "normal"
 MODE_HOLD = "hold"
+# MILP-driven thermal-battery modes: the joint solve's run windows drive
+# the setpoint between the comfort floor and the dump ceiling
+MODE_MILP_HEAT = "milp_heat"
+MODE_MILP_COAST = "milp_coast"
+
+
+def milp_setpoint(
+    in_window: bool, tank_max_c: float, tank_min_c: float
+) -> tuple[str, int]:
+    """Setpoint actuation for a planned tank window schedule.
+
+    Inside a planned heat window the setpoint goes to the dump ceiling
+    (the thermostat then runs the compressor until the tank is hot);
+    outside it drops to the comfort floor, ending the run and letting
+    the tank coast. The device thermostat handles the rest.
+    """
+    if in_window:
+        return MODE_MILP_HEAT, int(round(tank_max_c))
+    return MODE_MILP_COAST, int(round(tank_min_c))
 
 # Device operation modes on the Versati water_heater entity
 # (operation_list: off / heat_pump / performance).

@@ -119,3 +119,15 @@ def test_normalized_power_maps_boost_to_on_and_unknown_to_none():
     # unavailable / unknown modes leave the heater alone
     assert normalized_power(None) is None
     assert normalized_power("eco") is None
+
+
+# --- MILP setpoint actuation (thermal-battery mode) ---------------------------
+
+from home_energy_planner.water_heater_core import milp_setpoint  # noqa: E402
+
+
+def test_milp_setpoint_maps_window_to_ceiling_and_coast_to_floor():
+    assert milp_setpoint(True, 66.0, 50.0) == ("milp_heat", 66)
+    assert milp_setpoint(False, 66.0, 50.0) == ("milp_coast", 50)
+    # rounds, never truncates
+    assert milp_setpoint(True, 65.6, 50.4) == ("milp_heat", 66)

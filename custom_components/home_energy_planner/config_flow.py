@@ -107,6 +107,10 @@ def _options_schema(current: dict[str, Any]) -> vol.Schema:
                 default=_default("tank_daily_draw_kwh", 1.0),
             ): vol.Coerce(float),
             vol.Optional(
+                "water_heater_source",
+                default=_default("water_heater_source", "milp"),
+            ): vol.In(["rules", "milp"]),
+            vol.Optional(
                 "versati_cooling", default=_default("versati_cooling", "notify")
             ): vol.In(["off", "notify", "control"]),
             vol.Optional(

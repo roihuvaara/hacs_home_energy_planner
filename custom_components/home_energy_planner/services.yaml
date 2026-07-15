@@ -178,18 +178,18 @@ set_mode:
   fields:
     module:
       name: Module
-      description: Which planner module to switch. versati_cooling is the hydronic cooling rollout stage (off/notify/control).
+      description: Which planner module to switch. versati_cooling is the hydronic cooling rollout stage (off/notify/control); water_heater_source picks the tank setpoint source (rules/milp).
       required: true
       selector:
         select:
-          options: ["battery", "climate", "water_heater", "ilp", "versati_cooling"]
+          options: ["battery", "climate", "water_heater", "ilp", "versati_cooling", "water_heater_source"]
     mode:
       name: Mode
-      description: off computes nothing, observe publishes without writing, control also writes to the device. For versati_cooling use off/notify/control.
+      description: off computes nothing, observe publishes without writing, control also writes to the device. For versati_cooling use off/notify/control; for water_heater_source use rules/milp.
       required: true
       selector:
         select:
-          options: ["off", "observe", "notify", "control"]
+          options: ["off", "observe", "notify", "control", "rules", "milp"]
 
 versati_cool_trial:
   name: Versati hydronic cooling trial

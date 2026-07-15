@@ -62,6 +62,9 @@ class WaterHeaterData:
         mode: str,
         legacy_mode: str | None,
         applied: dict[str, Any] | None,
+        source: str = "rules",
+        plan_window_now: bool | None = None,
+        planned_tank_temp: float | None = None,
     ) -> None:
         self.result = result
         self.effective_mode = effective_mode
@@ -69,6 +72,14 @@ class WaterHeaterData:
         self.mode = mode
         self.legacy_mode = legacy_mode
         self.applied = applied
+        self.source = source
+        self.plan_window_now = plan_window_now
+        self.planned_tank_temp = planned_tank_temp
+
+
+# a battery plan tick older than this no longer drives the setpoint;
+# the rule engine takes over until the MILP artifact is fresh again
+MILP_PLAN_MAX_AGE = timedelta(minutes=20)
 
 
 class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
@@ -78,12 +89,14 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         entry: ConfigEntry,
         pricing: PricingCoordinator,
         preferences=None,
+        battery=None,
     ) -> None:
         super().__init__(
             hass, _LOGGER, name=f"{DOMAIN} water_heater", update_interval=None
         )
         self._entry = entry
         self._pricing = pricing
+        self._battery = battery
         self._config = WaterHeaterConfig()
         self._preferences = preferences
         self._effective_mode: str | None = None
@@ -132,7 +145,16 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
         """
         previous, since = self._effective_mode, self._mode_since
         mode = computed
-        if previous == "solar_boost" and computed != "solar_boost":
+        if computed == "milp_coast" and previous == "milp_heat":
+            # the MILP has its own min-up, but the rolling horizon can end
+            # a window between ticks; keep the run going for the dwell
+            if since is not None and now - since < MIN_CHEAP_BOOST_DWELL:
+                mode = "milp_heat"
+        elif (
+            previous == "solar_boost"
+            and computed != "solar_boost"
+            and not computed.startswith("milp")
+        ):
             in_dwell = since is not None and now - since < MIN_SOLAR_BOOST_DWELL
             if export_w >= SOLAR_EXIT_EXPORT_W or (in_dwell and computed == "normal"):
                 mode = "solar_boost"
@@ -157,6 +179,35 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
                 self._entry.data.get(CONF_WATER_HEATER_MODE, MODE_OBSERVE),
             )
         )
+
+    @property
+    def source(self) -> str:
+        """Setpoint source: 'milp' (joint tank plan) or 'rules' (legacy)."""
+        return str(
+            self._entry.options.get(
+                "water_heater_source",
+                self._entry.data.get("water_heater_source", "milp"),
+            )
+        )
+
+    def _milp_window_state(self, now: datetime) -> tuple[bool, float | None] | None:
+        """(in_window, planned_temp) from a fresh LP tank plan, else None."""
+        data = getattr(self._battery, "data", None)
+        if data is None or data.engine != "lp":
+            return None
+        tank_plan = getattr(data, "tank_plan", None)
+        if tank_plan is None or not tank_plan.on or not data.input_periods:
+            return None
+        plan_start = data.input_periods[0].start
+        if now - plan_start > MILP_PLAN_MAX_AGE:
+            return None
+        idx = int((now - plan_start).total_seconds() // (15 * 60))
+        if not 0 <= idx < len(tank_plan.on):
+            return None
+        planned_temp = (
+            tank_plan.temp_c[idx] if idx < len(tank_plan.temp_c) else None
+        )
+        return bool(tank_plan.on[idx]), planned_temp
 
     def async_schedule_ticks(self) -> None:
         @callback
@@ -220,8 +271,36 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
 
         from homeassistant.util import dt as dt_util
 
-        effective_mode = self._apply_dwell(result.mode, export_w, dt_util.now())
-        effective_target = self._config.targets[effective_mode]
+        now = dt_util.now()
+        milp_state = (
+            self._milp_window_state(now)
+            if self.source == "milp" and self._battery is not None
+            else None
+        )
+        plan_window_now: bool | None = None
+        planned_tank_temp: float | None = None
+        if milp_state is not None:
+            from .water_heater_core import milp_setpoint
+
+            tank = self._battery.tank_params()
+            plan_window_now, planned_tank_temp = milp_state
+            computed_mode, _ = milp_setpoint(
+                plan_window_now, tank.max_c, tank.min_c
+            )
+            active_source = "milp"
+            effective_mode = self._apply_dwell(computed_mode, export_w, now)
+            if effective_mode == "milp_heat":
+                effective_target = int(round(tank.max_c))
+            elif effective_mode == "milp_coast":
+                effective_target = int(round(tank.min_c))
+            else:  # a legacy dwell held over across a source flip
+                effective_target = self._config.targets[effective_mode]
+        else:
+            # rules are the permanent fallback: source=rules, LP down,
+            # tank plan missing, or the battery plan gone stale
+            active_source = "rules"
+            effective_mode = self._apply_dwell(result.mode, export_w, now)
+            effective_target = self._config.targets[effective_mode]
         if self._preferences is not None:
             # per-weekday offset learned from tank-target overrides
             # (capped +-6 in preference.CAPS, so no further clamp needed)
@@ -246,6 +325,9 @@ class WaterHeaterCoordinator(DataUpdateCoordinator[WaterHeaterData]):
             mode=mode,
             legacy_mode=legacy_state.state if legacy_state else None,
             applied=applied,
+            source=active_source,
+            plan_window_now=plan_window_now,
+            planned_tank_temp=planned_tank_temp,
         )
 
     async def _async_apply(self, target: int) -> dict[str, Any]:

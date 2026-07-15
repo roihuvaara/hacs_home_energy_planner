@@ -320,6 +320,9 @@ class WaterHeaterModeSensor(CoordinatorEntity[WaterHeaterCoordinator], SensorEnt
         result = data.result
         return {
             "mode": data.mode,
+            "source": data.source,
+            "plan_window_now": data.plan_window_now,
+            "planned_tank_temp": data.planned_tank_temp,
             "computed_mode": result.mode,
             "target_temp": data.effective_target,
             "actual_surplus": result.actual_surplus,
