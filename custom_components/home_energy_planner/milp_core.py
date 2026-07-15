@@ -11,6 +11,8 @@ runtime fallback when highspy is unavailable.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from datetime import tzinfo
 
 from .battery_core import (
     CHARGE_EFF,
@@ -190,36 +192,97 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
 
 
 class TankParams:
-    """Measured Versati DHW characteristics (2026-07-05 run)."""
+    """Measured Versati DHW tank physics (thermal-battery model).
+
+    Sources (owner rule: constants from data, never textbook):
+    - power_kw / heat_c_per_min: 2026-07-05 measured run (3.3 kW electric,
+      0.23 C/min — the electric-equivalent kWh/C below therefore already
+      folds in whatever COP the DHW mode achieves).
+    - start_shortfall_c: ~19 min zero-gain startup transient (the old
+      per_start_kwh = 1.0 kWh expressed as missing temperature rise).
+    - loss_per_hour: exponential fit of the 2026-07-07 17:00 -> 07-08
+      09:00 coast (58.0 -> 51.1 C, pannuhuone ~21 C, no draws): k = 0.013.
+      NOTE: the earlier "53->30 in 18 h" figure included a large shower
+      draw and overstates loss ~5x.
+    - daily_draw_kwh: electric-equivalent of actual DHW draws only —
+      standing loss is modeled explicitly now, and loss alone accounts
+      for most of the tank's measured ~3 kWh/day.
+    - min_c/max_c: owner comfort floor 50 C (2026-07-15), dump ceiling 66
+      (device max 80 verified).
+    """
 
     def __init__(
         self,
         power_kw: float = 3.3,
-        per_start_kwh: float = 1.0,
+        heat_c_per_min: float = 0.23,
+        start_shortfall_c: float = 4.4,
+        loss_per_hour: float = 0.013,
+        ambient_c: float = 21.0,
+        min_c: float = 50.0,
+        max_c: float = 66.0,
+        daily_draw_kwh: float = 1.0,
         min_run_quarters: int = 3,
-        daily_need_kwh: float = 3.1,
         fuse_kw: float = 17.0,
     ) -> None:
         self.power_kw = power_kw
-        self.per_start_kwh = per_start_kwh
+        self.heat_c_per_min = heat_c_per_min
+        self.start_shortfall_c = start_shortfall_c
+        self.loss_per_hour = loss_per_hour
+        self.ambient_c = ambient_c
+        self.min_c = min_c
+        self.max_c = max_c
+        self.daily_draw_kwh = daily_draw_kwh
         self.min_run_quarters = min_run_quarters
-        self.daily_need_kwh = daily_need_kwh
         self.fuse_kw = fuse_kw
+
+    @property
+    def kwh_per_quarter(self) -> float:
+        return self.power_kw * 0.25
+
+    @property
+    def gain_c_per_quarter(self) -> float:
+        return self.heat_c_per_min * 15.0
+
+    @property
+    def kwh_per_c(self) -> float:
+        """Electric-equivalent kWh to raise the tank 1 C (COP folded in)."""
+        return self.power_kw / (self.heat_c_per_min * 60.0)
+
+
+@dataclass(frozen=True)
+class TankPlan:
+    """Planned tank trajectory: run schedule + predicted temperature."""
+
+    on: list[bool]
+    temp_c: list[float]
+    windows: list[tuple[int, int]]  # [start, end) period indices
+    surplus_kwh: list[float]  # surplus fed to the tank per period
+    electric_cost_cents: float
+    floor_slack_c: float  # >0 means the comfort floor was unreachable
 
 
 def solve_joint(
     periods: list[Period],
     battery: BatteryParams,
     tank: TankParams | None = None,
-) -> tuple[DispatchPlan, list[tuple[int, int]]]:
-    """Co-optimize battery dispatch and tank heat runs over the horizon.
+    initial_temp_c: float | None = None,
+    local_tz: tzinfo | None = None,
+) -> tuple[DispatchPlan, TankPlan]:
+    """Co-optimize battery dispatch and the DHW tank as a thermal battery.
 
-    First true multi-asset solve (research doc step 1): tank runs are
-    binaries with min-up and a per-start transient cost, the tank's
-    electric draw shares the fuse cap with battery charging, and both
-    trade against the same price series. Returns the battery dispatch
-    plan plus the scheduled tank run windows as [start, end) period
-    indices. MIP with ~2n binaries; HiGHS solves it in milliseconds.
+    The tank carries a temperature state: runs raise it 3.45 C/quarter
+    (minus a per-start shortfall), standing loss decays it toward the
+    pannuhuone ambient, forecast draws debit it, and the comfort floor
+    must hold at all times (a slack keeps a cold start solvable — heat
+    first, don't go infeasible). Surplus PV is shared three ways per
+    quarter — battery absorb, tank feed, export — priced by the export
+    contract, so "dump surplus into hot water vs sell it" is decided by
+    the objective, not a rule. MIP with 2n binaries; HiGHS stays in the
+    milliseconds.
+
+    ``local_tz`` places the draw profile (07:00-23:00 local); omit when
+    period starts are already local. Returns the battery dispatch plan
+    plus a TankPlan (run windows, predicted temperature trajectory).
     """
     import highspy
 
@@ -228,7 +291,7 @@ def solve_joint(
     if n == 0:
         return (
             DispatchPlan([], 0.0, 0.0, battery.soc_pct),
-            [],
+            TankPlan([], [], [], [], 0.0, 0.0),
         )
 
     capacity = battery.usable_above_reserve_kwh
@@ -240,14 +303,36 @@ def solve_joint(
     net_load = [max(0.0, p.load_kwh - p.solar_kwh) for p in periods]
     surplus = [max(0.0, p.solar_kwh - p.load_kwh) for p in periods]
     price = [p.price_cents_per_kwh for p in periods]
+    export = [p.export_cents_per_kwh for p in periods]
     terminal_value = (
         max(0.0, DISCHARGE_EFF * (min(price) - CYCLE_COST_CENTS_PER_KWH)) + 1e-3
     )
 
-    delta_h = 0.25
-    tank_kwh_per_quarter = tank.power_kw * delta_h
-    need_kwh = tank.daily_need_kwh * (n * delta_h / 24.0)
+    tank_kwh_q = tank.kwh_per_quarter
+    gain_q = tank.gain_c_per_quarter
+    k_q = tank.loss_per_hour / 4.0
     run_quarters = tank.min_run_quarters
+    temp0 = tank.min_c if initial_temp_c is None else float(initial_temp_c)
+    # forecast draws as a temperature debit, spread over waking hours;
+    # the MPC re-reads the live tank temp every tick so errors self-heal
+    draw_hours = range(7, 23)
+    draw_quarters = [
+        t
+        for t in range(n)
+        if (
+            periods[t].start.astimezone(local_tz)
+            if local_tz is not None
+            else periods[t].start
+        ).hour
+        in draw_hours
+    ]
+    draw_c = [0.0] * n
+    if draw_quarters:
+        per_quarter_c = (
+            tank.daily_draw_kwh * (n * 0.25 / 24.0) / len(draw_quarters)
+        ) / tank.kwh_per_c
+        for t in draw_quarters:
+            draw_c[t] = per_quarter_c
 
     solver = highspy.Highs()
     solver.silent()
@@ -270,7 +355,18 @@ def solve_joint(
     def ri(t):  # run-start binary
         return 5 * n + t
 
-    num_vars = 6 * n
+    def Ti(t):  # tank temperature AFTER period t
+        return 6 * n + t
+
+    def wi(t):  # surplus kWh fed to the tank
+        return 7 * n + t
+
+    def zi(t):  # per-quarter comfort-floor slack (cold starts stay solvable;
+        # a shared slack would relax EVERY quarter once paid, letting the
+        # solver camp below the floor forever)
+        return 8 * n + t
+
+    num_vars = 9 * n
     lower = [0.0] * num_vars
     upper = [0.0] * num_vars
     cost = [0.0] * num_vars
@@ -281,13 +377,24 @@ def solve_joint(
         upper[si(t)] = capacity
         upper[ui(t)] = 1.0
         upper[ri(t)] = 1.0
+        upper[Ti(t)] = tank.max_c
+        upper[wi(t)] = min(surplus[t], tank_kwh_q)
         cost[gi(t)] = price[t] / CHARGE_EFF
         cost[di(t)] = DISCHARGE_EFF * (CYCLE_COST_CENTS_PER_KWH - price[t])
         # forgone export on absorbed surplus, mirroring solve_lp
-        cost[ai(t)] = periods[t].export_cents_per_kwh / CHARGE_EFF - 1e-6
-        cost[ui(t)] = tank_kwh_per_quarter * price[t]
-        cost[ri(t)] = tank.per_start_kwh * price[t]
+        cost[ai(t)] = export[t] / CHARGE_EFF - 1e-6
+        # a run buys grid energy unless fed from surplus: w swaps grid
+        # cost for forgone export (negative saving when price > export)
+        cost[ui(t)] = tank_kwh_q * price[t]
+        cost[wi(t)] = export[t] - price[t]
+        upper[zi(t)] = tank.min_c
+        # well above any credible energy price so violations only absorb
+        # the genuinely unreachable deficit of a below-floor start
+        cost[zi(t)] = 50.0
     cost[si(n - 1)] -= terminal_value
+    # leftover tank heat avoids future runs at least at the horizon's
+    # cheapest price; without it every solve coasts to the floor edge
+    cost[Ti(n - 1)] -= tank.kwh_per_c * max(0.0, min(price))
 
     solver.addVars(num_vars, lower, upper)
     solver.changeColsCost(num_vars, list(range(num_vars)), cost)
@@ -318,19 +425,33 @@ def solve_joint(
         # fuse cap: house net load + battery grid charge + tank draw
         solver.addRow(
             -inf,
-            tank.fuse_kw * delta_h - net_load[t],
+            tank.fuse_kw * 0.25 - net_load[t],
             2,
             [gi(t), ui(t)],
-            [1.0 / CHARGE_EFF, tank_kwh_per_quarter],
+            [1.0 / CHARGE_EFF, tank_kwh_q],
         )
-    # tank energy need over the horizon
-    solver.addRow(
-        need_kwh,
-        inf,
-        n,
-        [ui(t) for t in range(n)],
-        [tank_kwh_per_quarter] * n,
-    )
+        # tank temperature dynamics:
+        # T_t = (1-k)*T_{t-1} + k*ambient + gain*u_t - shortfall*r_t - draw
+        # (the start quarter nets 3.45-4.4 < 0 — a ~1 C artifact dip since
+        # the real transient is "no gain", not negative; it mildly penalizes
+        # starting exactly at the floor, which is conservative)
+        rhs_t = k_q * tank.ambient_c - draw_c[t]
+        idx_temp = [Ti(t), ui(t), ri(t)]
+        coef_temp = [1.0, -gain_q, tank.start_shortfall_c]
+        if t == 0:
+            rhs_t += (1.0 - k_q) * temp0
+        else:
+            idx_temp.append(Ti(t - 1))
+            coef_temp.append(-(1.0 - k_q))
+        solver.addRow(rhs_t, rhs_t, len(idx_temp), idx_temp, coef_temp)
+        # comfort floor with slack: T_t + z_t >= min_c
+        solver.addRow(tank.min_c, inf, 2, [Ti(t), zi(t)], [1.0, 1.0])
+        # surplus feed only while running
+        solver.addRow(-inf, 0.0, 2, [wi(t), ui(t)], [1.0, -tank_kwh_q])
+        # surplus is shared: battery absorb + tank feed <= surplus
+        solver.addRow(
+            -inf, surplus[t], 2, [ai(t), wi(t)], [1.0 / CHARGE_EFF, 1.0]
+        )
 
     solver.run()
     if solver.getModelStatus() != highspy.HighsModelStatus.kOptimal:
@@ -340,16 +461,28 @@ def solve_joint(
     plans: list[PeriodPlan] = []
     total = 0.0
     baseline = 0.0
+    export_revenue = 0.0
+    tank_cost = 0.0
     buffer = start_buffer
     for t, period in enumerate(periods):
         g = max(0.0, values[gi(t)])
+        a = max(0.0, values[ai(t)])
         d = max(0.0, values[di(t)])
+        w = max(0.0, values[wi(t)])
         buffer_end = max(0.0, values[si(t)])
         deliver = d * DISCHARGE_EFF
         grid_charge = g / CHARGE_EFF
         grid_import = max(0.0, net_load[t] - deliver) + grid_charge
-        baseline += net_load[t] * price[t]
-        total += grid_import * price[t] + deliver * CYCLE_COST_CENTS_PER_KWH
+        export_kwh = max(0.0, surplus[t] - a / CHARGE_EFF - w)
+        baseline += net_load[t] * price[t] - surplus[t] * export[t]
+        total += (
+            grid_import * price[t]
+            + deliver * CYCLE_COST_CENTS_PER_KWH
+            - export_kwh * export[t]
+        )
+        export_revenue += export_kwh * export[t]
+        on = values[ui(t)] > 0.5
+        tank_cost += (tank_kwh_q * (1.0 if on else 0.0) - w) * price[t] + w * export[t]
         action = "charge" if g > _EPS else "self_use" if d > _EPS else "hold"
         plans.append(
             PeriodPlan(
@@ -361,14 +494,15 @@ def solve_joint(
                 discharge_to_load_kwh=round(deliver, 3),
                 grid_import_kwh=round(grid_import, 3),
                 price_cents_per_kwh=price[t],
+                export_kwh=round(export_kwh, 3),
             )
         )
         buffer = buffer_end
 
+    on_series = [values[ui(t)] > 0.5 for t in range(n)]
     windows: list[tuple[int, int]] = []
     run_start = None
-    for t in range(n):
-        on = values[ui(t)] > 0.5
+    for t, on in enumerate(on_series):
         if on and run_start is None:
             run_start = t
         elif not on and run_start is not None:
@@ -377,12 +511,21 @@ def solve_joint(
     if run_start is not None:
         windows.append((run_start, n))
 
+    tank_plan = TankPlan(
+        on=on_series,
+        temp_c=[round(values[Ti(t)], 2) for t in range(n)],
+        windows=windows,
+        surplus_kwh=[round(max(0.0, values[wi(t)]), 3) for t in range(n)],
+        electric_cost_cents=round(tank_cost, 2),
+        floor_slack_c=round(max(0.0, max(values[zi(t)] for t in range(n))), 2),
+    )
     return (
         DispatchPlan(
             periods=plans,
             total_cost_cents=round(total, 2),
             baseline_cost_cents=round(baseline, 2),
             end_soc_pct=round(battery.soc_from_buffer_kwh(buffer), 1),
+            export_revenue_cents=round(export_revenue, 2),
         ),
-        windows,
+        tank_plan,
     )

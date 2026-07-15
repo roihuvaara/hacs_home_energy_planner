@@ -116,7 +116,14 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
     _attr_native_unit_of_measurement = "%"
     _attr_icon = "mdi:battery-clock"
     _unrecorded_attributes = frozenset(
-        {"actions", "charge_slots", "discharge_slots", "series"}
+        {
+            "actions",
+            "charge_slots",
+            "discharge_slots",
+            "series",
+            "tank_milp_windows",
+            "tank_plan",
+        }
     )
 
     def __init__(self, coordinator: BatteryCoordinator, entry: ConfigEntry) -> None:
@@ -147,6 +154,15 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
             "engine": data.engine,
             "load_forecast": data.load_info,
             "tank_milp_windows": data.tank_windows,
+            "tank_plan": {
+                "initial_temp_c": data.tank_initial_temp,
+                "temp_c": data.tank_plan.temp_c,
+                "surplus_kwh": data.tank_plan.surplus_kwh,
+                "electric_cost_cents": data.tank_plan.electric_cost_cents,
+                "floor_slack_c": data.tank_plan.floor_slack_c,
+            }
+            if data.tank_plan is not None
+            else None,
             "planned_cost_cents": plan.total_cost_cents,
             "baseline_cost_cents": plan.baseline_cost_cents,
             "planned_saving_cents": round(

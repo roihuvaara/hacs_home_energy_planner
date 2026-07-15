@@ -56,6 +56,19 @@ DEFAULTS = {
     "load_temp_base_kwh": 81.9,
     "load_temp_slope_kwh_per_c": -2.80,
     "load_temp_warm_floor_kwh": 58.5,
+    # DHW tank thermal-battery model (see milp_core.TankParams for the
+    # measurement provenance of each constant)
+    "tank_temp_entity": "sensor.pannuhuone_gree_versati_hot_water_temperature",
+    "tank_power_kw": 3.3,
+    "tank_heat_c_per_min": 0.23,
+    "tank_start_shortfall_c": 4.4,
+    "tank_loss_per_hour": 0.013,
+    "tank_ambient_c": 21.0,
+    "tank_min_c": 50.0,
+    "tank_max_c": 66.0,
+    "tank_daily_draw_kwh": 1.0,
+    "tank_min_run_quarters": 3,
+    "fuse_kw": 17.0,
 }
 LOAD_SCALE_MIN = 0.7
 LOAD_SCALE_MAX = 1.4
@@ -73,6 +86,8 @@ class BatteryPlanData:
         tank_windows: list[dict[str, Any]] | None,
         input_periods: list[Period],
         applied: dict[str, Any] | None,
+        tank_plan: Any | None = None,
+        tank_initial_temp: float | None = None,
     ) -> None:
         self.plan = plan
         self.charge_slots = charge_slots
@@ -83,6 +98,8 @@ class BatteryPlanData:
         self.tank_windows = tank_windows
         self.input_periods = input_periods
         self.applied = applied
+        self.tank_plan = tank_plan
+        self.tank_initial_temp = tank_initial_temp
 
 
 class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
@@ -313,6 +330,23 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             values[key] = int(value) if key.startswith("max_") else float(value)
         return BatteryParams(**values)
 
+    def tank_params(self):
+        """DHW tank physics from options (defaults measured, see TankParams)."""
+        from .milp_core import TankParams
+
+        return TankParams(
+            power_kw=float(self._option("tank_power_kw")),
+            heat_c_per_min=float(self._option("tank_heat_c_per_min")),
+            start_shortfall_c=float(self._option("tank_start_shortfall_c")),
+            loss_per_hour=float(self._option("tank_loss_per_hour")),
+            ambient_c=float(self._option("tank_ambient_c")),
+            min_c=float(self._option("tank_min_c")),
+            max_c=float(self._option("tank_max_c")),
+            daily_draw_kwh=float(self._option("tank_daily_draw_kwh")),
+            min_run_quarters=int(self._option("tank_min_run_quarters")),
+            fuse_kw=float(self._option("fuse_kw")),
+        )
+
     async def _async_update_data(self) -> BatteryPlanData:
         mode = self.mode
         pricing = self._pricing.data
@@ -351,15 +385,22 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             plan.periods, battery, now=dt_util.now()
         )
 
-        # joint battery+tank MILP runs as an observe artifact alongside the
-        # rule-based water heater module; its windows publish for the gate
+        # joint battery+tank thermal MILP: publishes the tank run windows
+        # and predicted temperature trajectory for the water heater module
         tank_windows: list[dict[str, Any]] | None = None
-        if engine == "lp":
+        tank_plan = None
+        tank_temp = self._float_state("tank_temp_entity")
+        if engine == "lp" and tank_temp is not None:
             try:
-                from .milp_core import TankParams, solve_joint
+                from .milp_core import solve_joint
 
-                _joint_plan, windows = await self.hass.async_add_executor_job(
-                    solve_joint, periods, battery, TankParams()
+                _joint_plan, tank_plan = await self.hass.async_add_executor_job(
+                    solve_joint,
+                    periods,
+                    battery,
+                    self.tank_params(),
+                    tank_temp,
+                    now.tzinfo,
                 )
                 tank_windows = [
                     {
@@ -368,10 +409,16 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
                             periods[end - 1].start + timedelta(minutes=PERIOD_MINUTES)
                         ).isoformat(),
                     }
-                    for start, end in windows
+                    for start, end in tank_plan.windows
                 ]
-            except Exception as err:  # noqa: BLE001 - observe artifact only
-                _LOGGER.debug("Joint tank solve unavailable: %s", err)
+            except Exception as err:  # noqa: BLE001 - artifact must not kill the plan
+                tank_plan = None
+                _LOGGER.warning("Joint tank solve unavailable: %s", err)
+        elif engine == "lp":
+            _LOGGER.warning(
+                "Tank temperature unavailable (%s); skipping tank plan",
+                self._option("tank_temp_entity"),
+            )
 
         applied: dict[str, Any] | None = None
         if mode == MODE_CONTROL:
@@ -396,4 +443,6 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             tank_windows,
             periods,
             applied,
+            tank_plan=tank_plan,
+            tank_initial_temp=tank_temp,
         )

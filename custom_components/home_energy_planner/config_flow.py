@@ -97,6 +97,16 @@ def _options_schema(current: dict[str, Any]) -> vol.Schema:
                 default=_default("export_contracts_json", ""),
             ): str,
             vol.Optional(
+                "tank_min_c", default=_default("tank_min_c", 50.0)
+            ): vol.Coerce(float),
+            vol.Optional(
+                "tank_max_c", default=_default("tank_max_c", 66.0)
+            ): vol.Coerce(float),
+            vol.Optional(
+                "tank_daily_draw_kwh",
+                default=_default("tank_daily_draw_kwh", 1.0),
+            ): vol.Coerce(float),
+            vol.Optional(
                 "versati_cooling", default=_default("versati_cooling", "notify")
             ): vol.In(["off", "notify", "control"]),
             vol.Optional(

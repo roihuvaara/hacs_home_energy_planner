@@ -149,61 +149,153 @@ def test_lp_negative_prices_charge_full_rate():
     assert sum(p.discharge_to_load_kwh for p in negative) == 0
 
 
-def test_joint_solve_schedules_tank_into_cheap_contiguous_runs():
+def joint(periods, soc=18.0, tank=None, temp0=55.0):
     from home_energy_planner.milp_core import TankParams, solve_joint
+
+    return solve_joint(periods, battery(soc=soc), tank or TankParams(), temp0)
+
+
+def test_joint_tank_heats_in_cheap_hours_and_respects_min_up():
+    from home_energy_planner.milp_core import TankParams
 
     prices = [5.0] * 6 + [50.0] * 4 + [12.0] * 7 + [45.0] * 4 + [8.0] * 3
     periods = day(prices, [0.8] * 24)
-    params = battery()
     tank = TankParams()
-    plan, windows = solve_joint(periods, params, tank)
+    plan, tank_plan = joint(periods, tank=tank, temp0=52.0)
 
-    assert windows, "tank must be scheduled"
-    # min-run respected and runs contiguous by construction
-    assert all(end - start >= tank.min_run_quarters for start, end in windows)
-    # energy need met over the horizon
-    scheduled_kwh = sum(end - start for start, end in windows) * tank.power_kw * 0.25
-    assert scheduled_kwh >= tank.daily_need_kwh - 1e-6
-    # tank hours are drawn from the cheap end of the day
-    tank_prices = [
+    assert tank_plan.windows, "tank must be scheduled"
+    assert all(
+        end - start >= tank.min_run_quarters for start, end in tank_plan.windows
+    )
+    run_prices = [
         periods[t].price_cents_per_kwh
-        for start, end in windows
+        for start, end in tank_plan.windows
         for t in range(start, end)
     ]
-    assert max(tank_prices) <= 12.0, tank_prices
-    # battery still arbitrages: the joint battery plan stays consistent
+    assert max(run_prices) <= 12.0, run_prices
     assert plan.total_cost_cents < plan.baseline_cost_cents
 
 
-def test_joint_per_start_cost_prefers_fewer_runs():
-    from home_energy_planner.milp_core import TankParams, solve_joint
+def test_joint_temp_trajectory_physics():
+    from home_energy_planner.milp_core import TankParams
 
-    # two equally cheap windows far apart: with a big per-start cost the
-    # solver should consolidate into a single longer run
-    prices = [5.0] * 4 + [20.0] * 8 + [5.0] * 4 + [20.0] * 8
+    tank = TankParams()
+    prices = [5.0] * 8 + [20.0] * 16
     periods = day(prices, [0.4] * 24)
-    cheap_start = TankParams(per_start_kwh=0.0, daily_need_kwh=6.0)
-    pricey_start = TankParams(per_start_kwh=3.0, daily_need_kwh=6.0)
-    _, windows_free = solve_joint(periods, battery(), cheap_start)
-    _, windows_costly = solve_joint(periods, battery(), pricey_start)
-    assert len(windows_costly) <= len(windows_free)
+    _plan, tank_plan = joint(periods, tank=tank, temp0=55.0)
+
+    assert all(tank.min_c - 0.01 <= T <= tank.max_c + 0.01 for T in tank_plan.temp_c)
+    assert tank_plan.floor_slack_c == 0.0
+    for t in range(1, len(tank_plan.temp_c)):
+        prev, cur = tank_plan.temp_c[t - 1], tank_plan.temp_c[t]
+        if not tank_plan.on[t]:
+            # off: decays (loss + draws), never rises
+            assert cur <= prev + 0.01
+        else:
+            # on: net rise bounded by the heat rate
+            assert cur <= prev + tank.gain_c_per_quarter + 0.01
+
+
+def test_joint_hot_tank_coasts_through_expensive_evening():
+    from home_energy_planner.milp_core import TankParams
+
+    tank = TankParams()
+    prices = [30.0] * 20 + [5.0] * 4  # expensive until late night
+    periods = day(prices, [0.4] * 24)
+    _plan, tank_plan = joint(periods, tank=tank, temp0=64.0)
+    # plenty of stored heat: no runs during the expensive stretch
+    expensive_on = [
+        on
+        for on, p in zip(tank_plan.on, periods)
+        if p.price_cents_per_kwh == 30.0 and on
+    ]
+    assert expensive_on == []
+
+
+def test_joint_cold_tank_heats_first_via_slack():
+    from home_energy_planner.milp_core import TankParams
+
+    tank = TankParams()
+    prices = [20.0] * 24
+    periods = day(prices, [0.4] * 24)
+    _plan, tank_plan = joint(periods, tank=tank, temp0=40.0)
+    # below-floor start is solvable and the first window starts immediately
+    assert tank_plan.windows and tank_plan.windows[0][0] == 0
+    # slack covers the initial deficit only; temp recovers to the floor
+    assert tank_plan.temp_c[-1] >= tank.min_c - 0.01
+
+
+def test_joint_start_shortfall_consolidates_runs():
+    from home_energy_planner.milp_core import TankParams
+
+    # the start transient wastes heat, so runs get longer on average
+    # (window COUNT can legitimately grow: wasted starts may force extra
+    # runs to hold the floor — length per run is the consolidation signal)
+    prices = ([5.0] * 4 + [20.0] * 8) * 2
+    periods = day(prices, [0.4] * 24)
+    no_shortfall = TankParams(start_shortfall_c=0.0, daily_draw_kwh=3.0)
+    shortfall = TankParams(daily_draw_kwh=3.0)  # measured 4.4 C
+    _p1, plan_free = joint(periods, tank=no_shortfall, temp0=55.0)
+    _p2, plan_costly = joint(periods, tank=shortfall, temp0=55.0)
+
+    def avg_len(tank_plan):
+        lengths = [end - start for start, end in tank_plan.windows]
+        return sum(lengths) / len(lengths) if lengths else 0.0
+
+    assert avg_len(plan_costly) >= avg_len(plan_free)
 
 
 def test_joint_fuse_cap_limits_simultaneous_load():
-    from home_energy_planner.milp_core import TankParams, solve_joint
+    from home_energy_planner.milp_core import TankParams
 
     # tiny fuse: tank (3.3 kW) + house (1.6 kW) leaves no room for battery
     # charging during tank runs
     prices = [5.0] * 8 + [40.0] * 16
     periods = day(prices, [1.6] * 24)
     tank = TankParams(fuse_kw=5.0)
-    plan, windows = solve_joint(periods, battery(), tank)
-    on_quarters = {t for start, end in windows for t in range(start, end)}
+    plan, tank_plan = joint(periods, tank=tank, temp0=51.0)
+    on_quarters = {t for start, end in tank_plan.windows for t in range(start, end)}
+    # fuse headroom during a tank run: 5 kW - 1.6 house - 3.3 tank = 0.1 kW
+    headroom_kwh = (tank.fuse_kw - 1.6 - tank.power_kw) * 0.25
     for t in on_quarters:
-        assert plan.periods[t].grid_charge_kwh <= 0.02, (
+        assert plan.periods[t].grid_charge_kwh <= headroom_kwh + 1e-6, (
             t,
             plan.periods[t].grid_charge_kwh,
         )
+
+
+def test_joint_surplus_feeds_tank_as_dump_load():
+    from home_energy_planner.milp_core import TankParams
+
+    tank = TankParams()
+    # flat price, plenty of solar, tiny export value: heating on surplus
+    # is nearly free, so the tank is driven up as a dump load
+    prices = [9.0] * 24
+    periods = day(prices, [0.2] * 24, bell(14.0), export_cents=0.5)
+    _plan, tank_plan = joint(periods, tank=tank, temp0=51.0)
+    assert sum(tank_plan.surplus_kwh) > 1.0
+    assert max(tank_plan.temp_c) > 60.0
+    # high export value attenuates the dump: selling beats storing heat
+    _plan2, rich_export = joint(
+        day(prices, [0.2] * 24, bell(14.0), export_cents=12.0),
+        tank=tank,
+        temp0=51.0,
+    )
+    assert sum(rich_export.surplus_kwh) <= sum(tank_plan.surplus_kwh) + 1e-6
+    assert max(rich_export.temp_c) <= max(tank_plan.temp_c) + 0.01
+
+
+def test_joint_solve_time_stays_fast():
+    import time
+
+    from home_energy_planner.milp_core import TankParams
+
+    prices = ([5.0, 8.0, 12.0, 7.0, 30.0, 25.0] * 8)[:48]
+    periods = day(prices, [0.5] * 48, None)
+    started = time.monotonic()
+    joint(periods, tank=TankParams(), temp0=55.0)
+    # runs in an executor once per 15-min tick; 5 s is ample headroom
+    assert time.monotonic() - started < 5.0
 
 
 # --- export economics (LP only; DP stays export-blind by design) -------------
