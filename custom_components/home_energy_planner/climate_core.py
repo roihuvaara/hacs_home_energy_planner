@@ -92,8 +92,25 @@ class ClimateConfig:
     regime_room_mean_heat_below: float = 23.2  # backup net under the 23-23.5 band
     regime_exit_forecast_margin: float = 1.0  # widen own entry band while inside
     regime_exit_room_margin: float = 0.2
-    # within COOL, when cooling actually runs: night block (cheap, high
-    # cooling COP in cool night air) or measured solar surplus
+    # within COOL, when cooling actually runs: ranked cheapest quarters
+    # of the price horizon (effective price = all-in + COP penalty for
+    # warm outdoor air) or measured solar surplus. Budget is a fraction
+    # of the horizon — 0.5 keeps the duty the shipped 21-09 night block
+    # had; placement is what the ranking optimizes.
+    cool_budget_fraction: float = 0.5
+    cool_min_run_quarters: int = 4  # slab compressor: no sub-hour cycling
+    # cents/kWh added per °C of forecast outdoor temperature: rejecting
+    # heat into cool air buys more cooling per kWh, so warm quarters must
+    # be cheaper on the meter to rank equal. Only relative differences
+    # matter to the ranking. 0.3 c/°C makes the observed ~10 °C night-day
+    # swing weigh about one p10-p90 price spread (~3 c, the shaping
+    # deadband above) — night wins by default, but a genuinely cheap
+    # afternoon (windy/negative prices) can still take the slot. To be
+    # recalibrated from plan-vs-reality data once cooling COP is
+    # identified.
+    cool_cop_penalty_c_per_deg: float = 0.3
+    # fallback block when the price horizon is missing: degrade to the
+    # shipped behaviour (cheap, high-COP night air), never to no cooling
     cool_night_start_hour: int = 21
     cool_night_end_hour: int = 9
     cool_surplus_export_w: float = 500.0
@@ -332,16 +349,63 @@ def decide_regime(
     return target, f"{current}->{target}"
 
 
-def cool_active_now(
-    local_hour: int, grid_export_w: float, config: ClimateConfig | None = None
-) -> bool:
-    """Within COOL regime: run in the night block or on measured surplus."""
+def plan_cool_windows(
+    future_all_in: list[float],
+    hourly_forecast: list[ForecastHour],
+    config: ClimateConfig | None = None,
+) -> list[tuple[int, int]]:
+    """Ranked cheapest [start, end) quarter windows for slab cooling.
+
+    Quarters are ranked by effective price — all-in cents plus the COP
+    penalty for the forecast outdoor temperature of that quarter's hour —
+    and the cheapest non-overlapping min-run windows are picked until the
+    budget fraction of the horizon is placed. No qualification gate: in
+    the COOL regime the slab must get its hours; only placement moves.
+    """
     config = config or ClimateConfig()
+    quarters = len(future_all_in)
+    if quarters < config.cool_min_run_quarters:
+        return []
+    effective = list(future_all_in)
+    if hourly_forecast:
+        last = len(hourly_forecast) - 1
+        effective = [
+            price
+            + config.cool_cop_penalty_c_per_deg
+            * hourly_forecast[min(i // 4, last)].temperature
+            for i, price in enumerate(future_all_in)
+        ]
+    from .price_windows import plan_budget_windows
+
+    return plan_budget_windows(
+        effective,
+        min_run_quarters=config.cool_min_run_quarters,
+        budget_quarters=int(quarters * config.cool_budget_fraction),
+    )
+
+
+def cool_active_now(
+    local_hour: int,
+    grid_export_w: float,
+    config: ClimateConfig | None = None,
+    *,
+    cool_windows: list[tuple[int, int]] | None = None,
+) -> bool:
+    """Within COOL regime: in a ranked cheap window or on measured surplus.
+
+    cool_windows=None means no usable price horizon — fall back to the
+    fixed night block so the planner degrades to the pre-price behaviour
+    rather than to no cooling at all.
+    """
+    config = config or ClimateConfig()
+    if grid_export_w >= config.cool_surplus_export_w:
+        return True
+    if cool_windows is not None:
+        return any(start == 0 for start, _end in cool_windows)
     start, end = config.cool_night_start_hour, config.cool_night_end_hour
-    in_night = (local_hour >= start or local_hour < end) if start > end else (
+    return (local_hour >= start or local_hour < end) if start > end else (
         start <= local_hour < end
     )
-    return in_night or grid_export_w >= config.cool_surplus_export_w
 
 
 def dew_point_c(temp_c: float, rh_pct: float) -> float:

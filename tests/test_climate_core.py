@@ -307,14 +307,68 @@ def test_regime_cool_exit_hysteresis_and_heat_override():
     assert decide_regime("cool", 18.0, 18.0, 26.0, 23.0, CONFIG)[0] == "heat"
 
 
-def test_cool_active_night_block_and_surplus():
+def test_cool_active_night_block_fallback_and_surplus():
     from home_energy_planner.climate_core import cool_active_now
 
+    # no price horizon (cool_windows=None): the fixed night block applies
     assert cool_active_now(23, 0.0, CONFIG)  # night
     assert cool_active_now(3, 0.0, CONFIG)  # night wraps past midnight
     assert not cool_active_now(14, 0.0, CONFIG)  # afternoon, no surplus
     assert cool_active_now(14, 900.0, CONFIG)  # afternoon on solar surplus
     assert not cool_active_now(9, 0.0, CONFIG)  # block ends at 09
+
+
+def test_cool_active_follows_ranked_windows_over_night_block():
+    from home_energy_planner.climate_core import cool_active_now
+
+    # with a horizon, windows replace the clock entirely: active iff a
+    # window covers the current quarter (index 0), whatever the hour
+    assert cool_active_now(14, 0.0, CONFIG, cool_windows=[(0, 8)])
+    assert not cool_active_now(23, 0.0, CONFIG, cool_windows=[(4, 12)])
+    # empty horizon-backed plan means no cheap quarters right now
+    assert not cool_active_now(23, 0.0, CONFIG, cool_windows=[])
+    # surplus overrides regardless of windows
+    assert cool_active_now(14, 900.0, CONFIG, cool_windows=[])
+
+
+def test_plan_cool_windows_prefers_cheap_and_cool_quarters():
+    from home_energy_planner.climate_core import plan_cool_windows
+
+    # flat prices, hot afternoon (hours 0-11) then cool night (12-23):
+    # the COP penalty pushes the whole budget into the cool half
+    prices = [10.0] * 96
+    forecast = hours([26.0] * 12 + [15.0] * 12)
+    windows = plan_cool_windows(prices, forecast, CONFIG)
+    assert windows == [(48, 96)]  # exactly the cool night half
+
+    # a deep price dip mid-afternoon outweighs the warm-air penalty:
+    # 26 C costs 26*0.3 = 7.8 c over 15 C air, a 9 c dip beats it
+    dipped = list(prices)
+    for i in range(16, 24):  # 04:00-06:00 into the hot half
+        dipped[i] = 1.0
+    windows = plan_cool_windows(dipped, forecast, CONFIG)
+    assert any(start <= 16 < end for start, end in windows)
+
+    # no forecast: pure price ranking still works
+    assert plan_cool_windows(dipped, [], CONFIG) != []
+    # unusably short horizon
+    assert plan_cool_windows([10.0, 10.0], forecast, CONFIG) == []
+
+
+def test_plan_budget_windows_fills_budget_on_flat_prices():
+    from home_energy_planner.price_windows import (
+        plan_budget_windows,
+        plan_cheap_windows,
+    )
+
+    flat = [10.0] * 48
+    # the gated planner refuses a flat day; the budget planner must not —
+    # it places required runtime, it does not decide whether to run
+    assert plan_cheap_windows(
+        flat, min_run_quarters=4, budget_quarters=24, margin_cents=1.0
+    ) == []
+    placed = plan_budget_windows(flat, min_run_quarters=4, budget_quarters=24)
+    assert sum(end - start for start, end in placed) == 24
 
 
 # --- projection ---------------------------------------------------------------

@@ -31,17 +31,41 @@ def plan_cheap_windows(
     average sits ``margin_cents`` below the day median, so a flat day
     yields no windows at all. Adjacent picks merge into longer runs.
     """
-    run = min_run_quarters
-    if len(prices) < run:
+    if len(prices) < min_run_quarters:
         return []
-    mid = median(prices)
+    return _greedy_windows(
+        prices, min_run_quarters, budget_quarters, median(prices) - margin_cents
+    )
+
+
+def plan_budget_windows(
+    prices: list[float],
+    *,
+    min_run_quarters: int,
+    budget_quarters: int,
+) -> list[tuple[int, int]]:
+    """Cheapest non-overlapping min-run windows filling the whole budget.
+
+    Same greedy as plan_cheap_windows but with no qualification gate:
+    this places *required* runtime (the load must get its hours no
+    matter how flat the day), it does not decide whether to run at all.
+    """
+    if len(prices) < min_run_quarters:
+        return []
+    return _greedy_windows(
+        prices, min_run_quarters, budget_quarters, float("inf")
+    )
+
+
+def _greedy_windows(
+    prices: list[float], run: int, budget: int, max_mean: float
+) -> list[tuple[int, int]]:
     means = [
         (sum(prices[i : i + run]) / run, i) for i in range(len(prices) - run + 1)
     ]
     chosen: list[tuple[int, int]] = []
-    budget = budget_quarters
     for mean, start in sorted(means):
-        if budget < run or mean > mid - margin_cents:
+        if budget < run or mean > max_mean:
             break
         end = start + run
         if any(start < c_end and c_start < end for c_start, c_end in chosen):

@@ -432,6 +432,7 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             cool_active_now,
             cool_water_target,
             decide_regime,
+            plan_cool_windows,
         )
 
         humidity = self._float_state("room_humidity_entity")
@@ -469,9 +470,27 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
         )
         cooling_mode = str(self._option("versati_cooling"))
         export_w = max(0.0, self._float_state("grid_power_entity") or 0.0)
-        cool_active = self._regime == REGIME_COOL and cool_active_now(
-            now.hour, export_w, self._config
+        # same >= 8-quarter usability floor as the ILP module; below it the
+        # windows are meaningless and cool_active_now falls back to the
+        # fixed night block
+        cool_windows = (
+            plan_cool_windows(future_all_in, hours, self._config)
+            if len(future_all_in) >= 8
+            else None
         )
+        cool_active = self._regime == REGIME_COOL and cool_active_now(
+            now.hour, export_w, self._config, cool_windows=cool_windows
+        )
+        cool_windows_attr: list[dict[str, str]] | None = None
+        if cool_windows is not None and pricing and pricing.periods:
+            horizon_start = pricing.periods[0].start
+            cool_windows_attr = [
+                {
+                    "start": (horizon_start + timedelta(minutes=15 * s)).isoformat(),
+                    "end": (horizon_start + timedelta(minutes=15 * e)).isoformat(),
+                }
+                for s, e in cool_windows
+            ]
         cooling = {
             "rollout": cooling_mode,
             "regime": self._regime,
@@ -480,6 +499,7 @@ class ClimateCoordinator(DataUpdateCoordinator[ClimateData]):
             else None,
             "regime_reason": self._regime_reason,
             "cool_active": cool_active,
+            "cool_windows": cool_windows_attr,
             "forecast_max_24h": forecast_max,
             "forecast_mean_72h": round(forecast_mean_72h, 1)
             if forecast_mean_72h is not None
