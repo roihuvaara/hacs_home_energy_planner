@@ -31,23 +31,19 @@ class InputRule:
     """Staleness rule for one critical input.
 
     stale_hours: silence tolerated before flagging.
-    off_when: entity whose literal "off" state makes this input's silence
-    expected (a powered-down device cannot report), so the check is skipped;
-    any other gate state (including unavailable) keeps the check active.
     """
 
     entity_id: str
     stale_hours: float = INPUT_STALE_HOURS
-    off_when: str | None = None
 
 
+# sensor.ilp_ulkolampotila is deliberately NOT monitored: MELCloud reports
+# outdoor temp as "unknown" for hours-long stretches even while the unit
+# runs (observed 2026-07-14..16), and its only consumer is a gap-tolerant
+# 7-day recorder mean — a warning is never actionable.
 CRITICAL_INPUTS = [
     InputRule("sensor.olohuone_climate_lampotila"),
     InputRule("sensor.olohuone_climate_kosteus"),
-    # the Gree unit stops reporting outdoor temp (state "unknown") whenever
-    # it is off — nightly, by plan; the only consumer is a gap-tolerant
-    # 7-day recorder mean
-    InputRule("sensor.ilp_ulkolampotila", off_when="climate.living_room"),
     # SolisCloud re-reports SOC only on change: a battery idling at the
     # reserve floor is legitimately silent all night (observed 2026-07-14,
     # flat 18 % from 23:07). Datalogger death still alarms within 3 h via
@@ -62,10 +58,6 @@ def stale_critical_inputs(get_state, now: datetime) -> list[str]:
     """Entity ids of critical inputs that are stale per their InputRule."""
     stale: list[str] = []
     for rule in CRITICAL_INPUTS:
-        if rule.off_when is not None:
-            gate = get_state(rule.off_when)
-            if gate is not None and gate.state == "off":
-                continue
         if input_is_stale(get_state(rule.entity_id), now, rule.stale_hours):
             stale.append(rule.entity_id)
     return stale

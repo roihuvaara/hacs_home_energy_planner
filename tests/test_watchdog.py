@@ -85,8 +85,10 @@ def test_input_staleness_respects_per_input_threshold():
 
 def test_critical_input_rules_encode_known_quiet_inputs():
     rules = {rule.entity_id: rule for rule in CRITICAL_INPUTS}
-    # ILP outdoor temp reads "unknown" whenever the unit itself is off
-    assert rules["sensor.ilp_ulkolampotila"].off_when == "climate.living_room"
+    # ILP outdoor temp goes "unknown" for hours even while the unit runs
+    # (MELCloud duty cycle) and only feeds a gap-tolerant 7-day mean —
+    # it must not be monitored at all
+    assert "sensor.ilp_ulkolampotila" not in rules
     # SOC is silent while the battery idles; grid power keeps the fast alarm
     assert rules["sensor.solis_remaining_battery_capacity"].stale_hours == 12.0
     assert rules["sensor.solis_power_grid_total_power"].stale_hours == 3.0
