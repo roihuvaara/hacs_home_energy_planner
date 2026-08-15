@@ -117,6 +117,22 @@ def _options_schema(current: dict[str, Any]) -> vol.Schema:
                 "manual_override_hours",
                 default=_default("manual_override_hours", 4.0),
             ): vol.All(vol.Coerce(float), vol.Range(min=0, max=48)),
+            # periodic cell-balance charge (balance.py). soft = when we
+            # start looking for a cheap moment, hard = when we stop caring
+            # what it costs; premium_frac caps what "not caring" means.
+            vol.Optional(
+                "balance_enabled", default=_default("balance_enabled", True)
+            ): bool,
+            vol.Optional(
+                "balance_soft_days", default=_default("balance_soft_days", 14.0)
+            ): vol.All(vol.Coerce(float), vol.Range(min=1, max=180)),
+            vol.Optional(
+                "balance_hard_days", default=_default("balance_hard_days", 21.0)
+            ): vol.All(vol.Coerce(float), vol.Range(min=2, max=365)),
+            vol.Optional(
+                "balance_max_premium_frac",
+                default=_default("balance_max_premium_frac", 0.5),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=5)),
         }
     )
 

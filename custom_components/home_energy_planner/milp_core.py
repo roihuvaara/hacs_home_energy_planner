@@ -30,13 +30,53 @@ _LOGGER = logging.getLogger(__name__)
 _EPS = 1e-6
 
 
+def _balance_target(
+    min_peak_buffer_kwh: float | None, capacity: float
+) -> float | None:
+    """Clamp the requested balance peak to the usable buffer, or drop it.
+
+    Clamping rather than rejecting keeps a target of "100 % SoC" solvable
+    when float arithmetic puts it a hair above ``capacity``.
+    """
+    if min_peak_buffer_kwh is None or min_peak_buffer_kwh <= _EPS:
+        return None
+    return min(float(min_peak_buffer_kwh), capacity)
+
+
+def _add_balance_rows(solver, highspy, n: int, target: float, si, bi) -> None:
+    """Require the buffer to reach ``target`` in at least one period.
+
+    ``b_t`` selects which period is the peak; ``s_t >= target * b_t``
+    needs no big-M because ``s_t`` is already bounded by capacity, and
+    ``sum(b_t) >= 1`` forces exactly the disjunction we want. The solver
+    picks the cheapest period to do it in, which is the whole point —
+    "charge at a cheap moment" is an optimizer output, not a rule.
+    """
+    idx_b = [bi(t) for t in range(n)]
+    solver.changeColsIntegrality(
+        n, idx_b, [highspy.HighsVarType.kInteger] * n
+    )
+    solver.addRow(1.0, highspy.kHighsInf, n, idx_b, [1.0] * n)
+    for t in range(n):
+        solver.addRow(0.0, highspy.kHighsInf, 2, [si(t), bi(t)], [1.0, -target])
+
+
 def solve_best(
-    periods: list[Period], battery: BatteryParams, engine: str = "lp"
+    periods: list[Period],
+    battery: BatteryParams,
+    engine: str = "lp",
+    min_peak_buffer_kwh: float | None = None,
 ) -> tuple[DispatchPlan, str]:
-    """Solve with the requested engine, falling back LP -> DP."""
+    """Solve with the requested engine, falling back LP -> DP.
+
+    ``min_peak_buffer_kwh`` is the cell-balance constraint (see
+    ``solve_lp``). The DP fallback cannot express it — the balance charge
+    is skipped rather than approximated, and the caller sees it via the
+    unchanged engine label.
+    """
     if engine == "lp":
         try:
-            return solve_lp(periods, battery), "lp"
+            return solve_lp(periods, battery, min_peak_buffer_kwh), "lp"
         except Exception as err:  # noqa: BLE001 - DP fallback by design
             _LOGGER.warning("LP engine unavailable (%s); falling back to DP", err)
     from .battery_core import solve
@@ -44,7 +84,11 @@ def solve_best(
     return solve(periods, battery), "dp"
 
 
-def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
+def solve_lp(
+    periods: list[Period],
+    battery: BatteryParams,
+    min_peak_buffer_kwh: float | None = None,
+) -> DispatchPlan:
     """Minimize import + cycle cost − export revenue; needs highspy.
 
     Export economics: absorbing surplus pays its forgone export value;
@@ -53,6 +97,13 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
     ~0.9 round-trip and 4 c/kWh cycle cost, selling at spot never clears
     the FI all-in import spread, and the export switch itself is still
     unprobed (todo 002).
+
+    ``min_peak_buffer_kwh`` adds the cell-balance constraint: the buffer
+    must reach that level in at least ONE period of the horizon. It is a
+    peak, not an endpoint — the solver stays free to spend the energy
+    again straight afterwards, which is what makes the cost difference
+    against the unconstrained solve a fair net price for balancing (see
+    ``balance.py``). Adding it turns the LP into a small MIP.
     """
     import highspy
 
@@ -100,7 +151,12 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
     def si(t: int) -> int:  # state AFTER period t
         return 3 * n + t
 
-    num_vars = 4 * n
+    def bi(t: int) -> int:  # "the balance peak lands here" selector
+        return 4 * n + t
+
+    balance_target = _balance_target(min_peak_buffer_kwh, capacity)
+    balancing = balance_target is not None
+    num_vars = (5 if balancing else 4) * n
     lower = [0.0] * num_vars
     upper = [0.0] * num_vars
     cost = [0.0] * num_vars
@@ -109,6 +165,8 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
         upper[ai(t)] = surplus[t] * CHARGE_EFF
         upper[di(t)] = min(discharge_step, net_load[t] / DISCHARGE_EFF)
         upper[si(t)] = capacity
+        if balancing:
+            upper[bi(t)] = 1.0
         # import cost: grid charge buys g/eff at price; discharge saves
         # d*eff of load at price but pays cycle cost on delivered energy
         cost[gi(t)] = price[t] / CHARGE_EFF
@@ -122,6 +180,8 @@ def solve_lp(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
 
     solver.addVars(num_vars, lower, upper)
     solver.changeColsCost(num_vars, list(range(num_vars)), cost)
+    if balancing:
+        _add_balance_rows(solver, highspy, n, balance_target, si, bi)
 
     # state balance: s_t - s_{t-1} - g_t - a_t + d_t = 0
     for t in range(n):
@@ -267,6 +327,7 @@ def solve_joint(
     tank: TankParams | None = None,
     initial_temp_c: float | None = None,
     local_tz: tzinfo | None = None,
+    min_peak_buffer_kwh: float | None = None,
 ) -> tuple[DispatchPlan, TankPlan]:
     """Co-optimize battery dispatch and the DHW tank as a thermal battery.
 
@@ -281,8 +342,12 @@ def solve_joint(
     milliseconds.
 
     ``local_tz`` places the draw profile (07:00-23:00 local); omit when
-    period starts are already local. Returns the battery dispatch plan
-    plus a TankPlan (run windows, predicted temperature trajectory).
+    period starts are already local. ``min_peak_buffer_kwh`` applies the
+    cell-balance constraint exactly as in ``solve_lp``; passing it here
+    too keeps the tank windows consistent with a horizon where the
+    battery is grid-charging, which matters most for the fuse cap.
+    Returns the battery dispatch plan plus a TankPlan (run windows,
+    predicted temperature trajectory).
     """
     import highspy
 
@@ -366,7 +431,12 @@ def solve_joint(
         # solver camp below the floor forever)
         return 8 * n + t
 
-    num_vars = 9 * n
+    def bi(t):  # "the balance peak lands here" selector
+        return 9 * n + t
+
+    balance_target = _balance_target(min_peak_buffer_kwh, capacity)
+    balancing = balance_target is not None
+    num_vars = (10 if balancing else 9) * n
     lower = [0.0] * num_vars
     upper = [0.0] * num_vars
     cost = [0.0] * num_vars
@@ -391,6 +461,8 @@ def solve_joint(
         # well above any credible energy price so violations only absorb
         # the genuinely unreachable deficit of a below-floor start
         cost[zi(t)] = 50.0
+        if balancing:
+            upper[bi(t)] = 1.0
     cost[si(n - 1)] -= terminal_value
     # leftover tank heat avoids future runs at least at the horizon's
     # cheapest price; without it every solve coasts to the floor edge
@@ -401,6 +473,8 @@ def solve_joint(
     integer = highspy.HighsVarType.kInteger
     binaries = [ui(t) for t in range(n)] + [ri(t) for t in range(n)]
     solver.changeColsIntegrality(len(binaries), binaries, [integer] * len(binaries))
+    if balancing:
+        _add_balance_rows(solver, highspy, n, balance_target, si, bi)
 
     inf = highspy.kHighsInf
     for t in range(n):

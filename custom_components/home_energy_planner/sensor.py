@@ -184,6 +184,7 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
             ][:64],
             "last_apply_success": (data.applied or {}).get("success"),
             "export_revenue_cents": plan.export_revenue_cents,
+            "cell_balance": data.balance,
             # aligned quarter-hour series for dashboard plotting
             "series": {
                 "start": plan.periods[0].start.isoformat() if plan.periods else None,

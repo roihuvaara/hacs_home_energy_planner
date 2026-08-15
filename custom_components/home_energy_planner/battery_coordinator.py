@@ -70,6 +70,14 @@ DEFAULTS = {
     "tank_min_run_quarters": 3,
     "fuse_kw": 17.0,
     "load_history_days": 28,
+    # periodic cell-balance charge (see balance.py for the policy and why
+    # a plain "every N days" rule is the wrong shape)
+    "balance_enabled": True,
+    "balance_target_soc_pct": 100.0,
+    "balance_detect_soc_pct": 97.0,
+    "balance_soft_days": 14.0,
+    "balance_hard_days": 21.0,
+    "balance_max_premium_frac": 0.5,
 }
 LOAD_SCALE_MIN = 0.7
 LOAD_SCALE_MAX = 1.4
@@ -89,6 +97,7 @@ class BatteryPlanData:
         applied: dict[str, Any] | None,
         tank_plan: Any | None = None,
         tank_initial_temp: float | None = None,
+        balance: dict[str, Any] | None = None,
     ) -> None:
         self.plan = plan
         self.charge_slots = charge_slots
@@ -101,6 +110,7 @@ class BatteryPlanData:
         self.applied = applied
         self.tank_plan = tank_plan
         self.tank_initial_temp = tank_initial_temp
+        self.balance = balance
 
 
 class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
@@ -113,6 +123,53 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         super().__init__(hass, _LOGGER, name=f"{DOMAIN} battery", update_interval=None)
         self._entry = entry
         self._pricing = pricing
+        from homeassistant.helpers.storage import Store
+
+        from .balance import BalanceState
+
+        # the balance clock must survive restarts: a fresh clock every
+        # reload would reset the deadline forever and the charge would
+        # never fire on a box that restarts weekly
+        self._balance = BalanceState()
+        self._balance_store: Store = Store(
+            hass, 1, f"{DOMAIN}.battery_balance_{entry.entry_id}"
+        )
+
+    async def async_restore_balance(self) -> None:
+        try:
+            data = await self._balance_store.async_load()
+        except Exception as err:  # noqa: BLE001 - corrupt store: start fresh
+            _LOGGER.warning("Balance state restore failed: %s", err)
+            return
+        self._balance.load_dict(data)
+
+    def _save_balance(self) -> None:
+        self._balance_store.async_delay_save(self._balance.to_dict, 10)
+
+    def balance_config(self):
+        from .balance import BalanceConfig
+
+        soft = float(self._option("balance_soft_days"))
+        hard = float(self._option("balance_hard_days"))
+        if hard <= soft:
+            # the options flow cannot cross-validate two fields; a swapped
+            # pair must degrade to "no opportunistic window", not raise on
+            # every tick and take the whole battery plan down
+            _LOGGER.warning(
+                "balance_hard_days (%s) must exceed balance_soft_days (%s); "
+                "using %s",
+                hard,
+                soft,
+                soft + 1.0,
+            )
+            hard = soft + 1.0
+        return BalanceConfig(
+            target_soc_pct=float(self._option("balance_target_soc_pct")),
+            detect_soc_pct=float(self._option("balance_detect_soc_pct")),
+            soft_days=soft,
+            hard_days=hard,
+            max_premium_frac=float(self._option("balance_max_premium_frac")),
+        )
 
     def async_schedule_ticks(self) -> None:
         @callback
@@ -358,6 +415,148 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             fuse_kw=float(self._option("fuse_kw")),
         )
 
+    def _balance_reachable(
+        self, periods: list[Period], battery: BatteryParams, target_kwh: float
+    ) -> bool:
+        """Can the horizon physically get the buffer to the balance target?
+
+        A charge from the reserve floor needs ~7 h at the planned current,
+        which a 26 h horizon has — but a short horizon (a late Nordpool
+        publish) or a throttled charge current would make the constraint
+        infeasible and take the whole plan down with it. Cheaper to check.
+        """
+        from .battery_core import CHARGE_EFF, current_to_period_kwh
+
+        charge_step = current_to_period_kwh(
+            min(battery.planned_charge_current, battery.max_charge_current)
+        )
+        start = min(
+            battery.usable_above_reserve_kwh,
+            battery.buffer_kwh_from_soc(battery.soc_pct),
+        )
+        surplus = sum(
+            max(0.0, p.solar_kwh - p.load_kwh) * CHARGE_EFF for p in periods
+        )
+        attainable = min(
+            battery.usable_above_reserve_kwh,
+            start + charge_step * len(periods) + surplus,
+        )
+        return attainable + 1e-6 >= target_kwh
+
+    async def _async_apply_balance(
+        self,
+        periods: list[Period],
+        battery: BatteryParams,
+        plan: DispatchPlan,
+        engine: str,
+        engine_option: str,
+        now: datetime,
+    ) -> tuple[DispatchPlan, dict[str, Any], float | None]:
+        """Decide whether this horizon carries the cell-balance charge.
+
+        Returns the plan to publish (the balanced one only when armed),
+        the decision for the sensor, and the balance target to hand the
+        joint tank solve so both engines see the same horizon.
+        """
+        from .balance import (
+            STAGE_IDLE,
+            days_since,
+            decide,
+            reference_charge_cost_cents,
+            stage_for,
+        )
+        from .battery_core import CHARGE_EFF
+
+        config = self.balance_config()
+        if self._balance.observe_soc(battery.soc_pct, now, config):
+            self._save_balance()
+        # a fresh install starts its clock now: an unknown history is not
+        # an overdue pack, and forcing a charge on the first tick would be
+        # a nasty surprise on a battery that is already full
+        if self._balance.last_balanced is None:
+            self._balance.seed(now)
+            self._save_balance()
+
+        age = days_since(self._balance.last_balanced, now)
+        target_kwh = battery.buffer_kwh_from_soc(config.target_soc_pct)
+        reference = reference_charge_cost_cents(
+            target_kwh,
+            min((p.price_cents_per_kwh for p in periods), default=0.0),
+            CHARGE_EFF,
+        )
+
+        if not bool(self._option("balance_enabled")):
+            info = decide(age, config, reference, None).as_dict()
+            info.update(
+                {
+                    "enabled": False,
+                    "armed": False,
+                    "applied": False,
+                    "reason": "balance charge disabled",
+                }
+            )
+            return plan, info, None
+
+        stage = stage_for(age, config)
+        premium: float | None = None
+        balanced: DispatchPlan | None = None
+        blocked: str | None = None
+
+        if stage != STAGE_IDLE:
+            if engine != "lp":
+                blocked = "DP fallback engine cannot express the balance constraint"
+            elif not self._balance_reachable(periods, battery, target_kwh):
+                blocked = "balance target unreachable within this horizon"
+            else:
+                from .milp_core import solve_best
+
+                try:
+                    balanced, _engine = await self.hass.async_add_executor_job(
+                        solve_best, periods, battery, engine_option, target_kwh
+                    )
+                    premium = balanced.total_cost_cents - plan.total_cost_cents
+                except Exception as err:  # noqa: BLE001 - plan survives this
+                    blocked = f"constrained solve failed: {err}"
+                    _LOGGER.warning("Balance solve unavailable: %s", err)
+
+        decision = decide(age, config, reference, premium)
+        info = decision.as_dict()
+        info.update(
+            {
+                "enabled": True,
+                "last_balanced": (
+                    self._balance.last_balanced.isoformat()
+                    if self._balance.last_balanced
+                    else None
+                ),
+                "deadline": (
+                    d.isoformat()
+                    if (d := self._balance.next_deadline(config))
+                    else None
+                ),
+                "target_soc_pct": config.target_soc_pct,
+                "reference_cost_cents": round(reference, 2),
+            }
+        )
+        if blocked:
+            info["blocked"] = blocked
+
+        if decision.armed and balanced is not None:
+            _LOGGER.info("Cell-balance charge armed: %s", decision.reason)
+            info["applied"] = True
+            return balanced, info, target_kwh
+        if decision.armed:
+            # past the deadline but with no usable constrained plan: keep
+            # the cost-optimal one and retry next tick rather than publish
+            # a plan the solver never validated
+            info["applied"] = False
+            _LOGGER.warning(
+                "Cell-balance charge due but not plannable (%s)", blocked or "no plan"
+            )
+            return plan, info, None
+        info["applied"] = False
+        return plan, info, None
+
     async def _async_update_data(self) -> BatteryPlanData:
         mode = self.mode
         pricing = self._pricing.data
@@ -394,9 +593,15 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
 
         from .milp_core import solve_best
 
+        engine_option = str(self._option("battery_engine"))
         plan, engine = await self.hass.async_add_executor_job(
-            solve_best, periods, battery, str(self._option("battery_engine"))
+            solve_best, periods, battery, engine_option
         )
+
+        plan, balance_info, balance_target_kwh = await self._async_apply_balance(
+            periods, battery, plan, engine, engine_option, now
+        )
+
         charge_slots, discharge_slots = compile_slots(
             plan.periods, battery, now=dt_util.now()
         )
@@ -417,6 +622,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
                     self.tank_params(),
                     tank_temp,
                     now.tzinfo,
+                    balance_target_kwh,
                 )
                 tank_windows = [
                     {
@@ -461,4 +667,5 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             applied,
             tank_plan=tank_plan,
             tank_initial_temp=tank_temp,
+            balance=balance_info,
         )

@@ -28,6 +28,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     battery = BatteryCoordinator(hass, entry, coordinator)
     if battery.mode != MODE_OFF:
+        await battery.async_restore_balance()
         await battery.async_refresh()
         battery.async_schedule_ticks()
 
