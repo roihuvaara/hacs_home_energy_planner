@@ -226,3 +226,20 @@ def test_export_contract_applied_in_horizon():
     assert all(p.export_cents_per_kwh == 7.7 for p in periods)
     # import side untouched by the export contract
     assert all(p.raw_cents_per_kwh == 8.0 for p in periods)
+
+
+def test_sell_fee_widens_the_curtailment_band():
+    """Export is worthless below the fee, not below zero spot.
+
+    The curtailment sensor keys off ``export_cents_per_kwh`` for exactly
+    this reason: with the owner's spot-minus-0.3 sell deal, a quarter at
+    +0.2 c spot still pays to export into.
+    """
+    deal = ExportContract(
+        date(2026, 1, 1), date(2099, 12, 31), "spot_minus_margin", margin_cents=0.3
+    )
+    assert export_cents_for(deal, 0.2) < 0  # positive spot, negative revenue
+    assert export_cents_for(deal, 0.3) == 0
+    assert export_cents_for(deal, 0.4) > 0
+    # an uncontracted (plain spot) deal keeps the old zero-spot band
+    assert export_cents_for(None, 0.2) > 0

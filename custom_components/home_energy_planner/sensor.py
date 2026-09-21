@@ -363,11 +363,15 @@ class WaterHeaterModeSensor(CoordinatorEntity[WaterHeaterCoordinator], SensorEnt
 
 
 class ExportCurtailmentSensor(CoordinatorEntity[PricingCoordinator], SensorEntity):
-    """Export-curtailment intent from raw spot prices (observe only).
+    """Export-curtailment intent from export compensation (observe only).
 
-    Publishes when the planner would disable grid export (raw spot at or
-    below zero); the control side lands after the export-switch semantics
-    probe (todo 002).
+    Publishes when the planner would disable grid export — when the
+    compensation actually paid is at or below zero, not merely when spot
+    is. Under a ``spot_minus_margin`` deal the sell-side fee eats the
+    last cent of a cheap quarter, so the curtailment band is wider than
+    the negative-spot band by exactly that margin. Falls back to raw spot
+    for an uncontracted (plain-spot) deal, where the two coincide. The
+    control side lands after the export-switch semantics probe (todo 002).
     """
 
     _attr_has_entity_name = True
@@ -388,7 +392,9 @@ class ExportCurtailmentSensor(CoordinatorEntity[PricingCoordinator], SensorEntit
         data = self.coordinator.data
         if data is None or not data.periods:
             return None
-        return "curtail" if data.periods[0].raw_cents_per_kwh <= 0 else "export"
+        return (
+            "curtail" if data.periods[0].export_cents_per_kwh <= 0 else "export"
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -399,7 +405,7 @@ class ExportCurtailmentSensor(CoordinatorEntity[PricingCoordinator], SensorEntit
         run_start = None
         previous = None
         for period in data.periods:
-            if period.raw_cents_per_kwh <= 0:
+            if period.export_cents_per_kwh <= 0:
                 if run_start is None:
                     run_start = period.start
                 previous = period.start
@@ -410,9 +416,12 @@ class ExportCurtailmentSensor(CoordinatorEntity[PricingCoordinator], SensorEntit
             windows.append({"start": run_start.isoformat(), "end": None})
         return {
             "raw_now": data.periods[0].raw_cents_per_kwh if data.periods else None,
+            "export_now": (
+                data.periods[0].export_cents_per_kwh if data.periods else None
+            ),
             "windows": windows,
             "curtailed_period_count": sum(
-                1 for p in data.periods if p.raw_cents_per_kwh <= 0
+                1 for p in data.periods if p.export_cents_per_kwh <= 0
             ),
         }
 
