@@ -20,11 +20,27 @@ from .solis_slots import SlotSpec, find_cross_side_overlaps
 
 PERIOD_MINUTES = 15
 PERIOD_HOURS = PERIOD_MINUTES / 60.0
-# 0.05 keeps the 12 A planned charge rate (0.15 kWh/quarter) exactly
-# representable; at 0.1 the int() truncation silently capped charging at
-# 0.1 kWh/quarter (~8 A), which the LP cross-check exposed.
-STATE_STEP_KWH = 0.05
-BATTERY_NOMINAL_VOLTAGE = 50.0
+# The DP's buffer grid. The old 0.05 was chosen to make a 12 A charge
+# (then believed to be 0.15 kWh/quarter) exactly representable — a
+# rationale that died with the 50 V error below, since 12 A is really
+# ~0.61 kWh/quarter. Worse, 0.05 is coarse against a quarter's LOAD:
+# serving 0.125 kWh in whole 0.05 steps leaves a quarter of it unserved
+# every period, which the old round-to-nearest hid by delivering energy
+# the buffer never paid for. Measured against the LP on the
+# sunny_arbitrage scenario: 0.05 -> 15.00 c apart, 0.025 -> 3.19,
+# 0.00625 -> 0.24 c, the last in 0.9 s for a 96-quarter horizon. The DP
+# only runs when the LP is down, so a second is cheap and agreement with
+# the engine it exists to cross-check is what matters (ADR 0009).
+STATE_STEP_KWH = 0.00625
+# This pack is HIGH VOLTAGE: sensor.solis_battery_voltage reads ~204.7 V,
+# and 204.7 x the live current reproduces sensor.solis_battery_power
+# exactly. The 50.0 that used to sit here was wrong by ~4x and quietly
+# throttled the planner's whole picture of the battery: a 25 A discharge
+# is 5.1 kW, not 1.25 (recorder has the pack at -5.2 kW on most days),
+# and a 12 A charge is 2.5 kW, not 0.6, so a full charge takes ~1.7 h
+# rather than the ~6.8 h our own notes claimed. The coordinator passes
+# the live reading; this is only the fallback when the sensor is missing.
+BATTERY_NOMINAL_VOLTAGE = 204.0
 ROUND_TRIP_EFFICIENCY = 0.9
 CHARGE_EFF = ROUND_TRIP_EFFICIENCY**0.5
 DISCHARGE_EFF = ROUND_TRIP_EFFICIENCY**0.5
@@ -56,6 +72,7 @@ class BatteryParams:
     max_charge_current: int
     max_discharge_current: int
     planned_charge_current: int = 12
+    nominal_voltage: float = BATTERY_NOMINAL_VOLTAGE
 
     @property
     def effective_capacity_kwh(self) -> float:
@@ -112,8 +129,10 @@ class DispatchPlan:
     export_revenue_cents: float = 0.0
 
 
-def current_to_period_kwh(current_a: int) -> float:
-    return max(0.0, current_a * BATTERY_NOMINAL_VOLTAGE * PERIOD_HOURS / 1000.0)
+def current_to_period_kwh(
+    current_a: int, voltage: float = BATTERY_NOMINAL_VOLTAGE
+) -> float:
+    return max(0.0, current_a * voltage * PERIOD_HOURS / 1000.0)
 
 
 def solve(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
@@ -126,9 +145,12 @@ def solve(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
         int(round(battery.buffer_kwh_from_soc(battery.soc_pct) / STATE_STEP_KWH)),
     )
     charge_step = current_to_period_kwh(
-        min(battery.planned_charge_current, battery.max_charge_current)
+        min(battery.planned_charge_current, battery.max_charge_current),
+        battery.nominal_voltage,
     )
-    discharge_step = current_to_period_kwh(battery.max_discharge_current)
+    discharge_step = current_to_period_kwh(
+        battery.max_discharge_current, battery.nominal_voltage
+    )
     # round, not truncate: 0.15/0.05 is 2.999... in floats and int()
     # would silently drop a third of the charge rate
     charge_units = max(1, int(round(charge_step / STATE_STEP_KWH)))
@@ -175,8 +197,21 @@ def solve(periods: list[Period], battery: BatteryParams) -> DispatchPlan:
 
             # self_use: discharge toward net load
             usable = min(s, discharge_units)
-            deliver = min(usable * STATE_STEP_KWH * DISCHARGE_EFF, net_load)
-            drain_units = int(round(deliver / DISCHARGE_EFF / STATE_STEP_KWH))
+            # Quantize the DRAIN, then derive delivery from it — never
+            # the other way round. Deriving the drain from a load-capped
+            # delivery leaves the exact drain between states, and rounding
+            # it to nearest hands the DP delivery the buffer never paid
+            # for: free round-trip efficiency, enough to beat the hold
+            # tie-break and drain the pack on flat prices. Rounding the
+            # drain up instead overcharges it ~10 % and pushed the DP 20 %
+            # off the LP. Whole steps only, load is the ceiling, and the
+            # unserved remainder is imported. Invisible until the
+            # discharge rate rose above the load (the 50 V -> 204 V fix);
+            # the LP, which is not quantized, was right throughout.
+            drain_units = min(
+                usable, int(net_load / DISCHARGE_EFF / STATE_STEP_KWH + 1e-9)
+            )
+            deliver = drain_units * STATE_STEP_KWH * DISCHARGE_EFF
             s_use = min(max_units, s - drain_units + surplus_units)
             cost_use = (
                 (net_load - deliver) * period.price_cents_per_kwh
@@ -341,7 +376,10 @@ def compile_slots(
                 1,
                 min(
                     battery.max_charge_current,
-                    int(energy / CHARGE_EFF / hours / BATTERY_NOMINAL_VOLTAGE * 1000 + 0.999),
+                    int(
+                        energy / CHARGE_EFF / hours / battery.nominal_voltage * 1000
+                        + 0.999
+                    ),
                 ),
             )
             soc = int(min(100, round(battery.soc_from_buffer_kwh(window[-1].buffer_end_kwh))))
@@ -357,7 +395,7 @@ def compile_slots(
                         energy
                         / DISCHARGE_EFF
                         / hours
-                        / BATTERY_NOMINAL_VOLTAGE
+                        / battery.nominal_voltage
                         * 1000
                         + 0.999
                     ),

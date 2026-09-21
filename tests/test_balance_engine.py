@@ -19,6 +19,7 @@ pytest.importorskip("highspy")
 
 from home_energy_planner.balance import reference_charge_cost_cents  # noqa: E402
 from home_energy_planner.battery_core import (  # noqa: E402
+    current_to_period_kwh,
     CHARGE_EFF,
     BatteryParams,
     Period,
@@ -129,22 +130,28 @@ def test_solver_picks_the_cheapest_moment_to_balance():
 
 
 def test_balance_charge_is_rate_limited_to_the_planned_current():
-    """A cheap window shorter than 6.8 h cannot hold the whole charge.
+    """A trough too short to hold the charge spills into dearer hours.
 
-    The solver saturates what the cheap block can take and buys the rest
-    at whatever is next-cheapest — which is exactly why the premium rises
-    on horizons with short troughs, and why the policy is willing to wait
-    days for a wider one.
+    This is why the premium rises on horizons with narrow troughs and why
+    the policy will wait days for a wider one. The pack is high voltage,
+    so 12 A is ~0.61 kWh/quarter and a full charge takes well under two
+    hours — the trough has to be genuinely short to bind.
     """
     params = battery()
-    periods = day([20.0] * 3 + [2.0] * 3 + [20.0] * 18, [0.8] * 24)
+    step = current_to_period_kwh(
+        min(params.planned_charge_current, params.max_charge_current),
+        params.nominal_voltage,
+    )
+    # one hour of cheap, against a charge that needs more than that
+    periods = day([20.0] * 3 + [2.0] * 1 + [20.0] * 20, [0.8] * 24)
     target = params.buffer_kwh_from_soc(100.0)
     plan = solve_lp(periods, params, target)
     cheap = sum(
         p.grid_charge_kwh for p in plan.periods if p.price_cents_per_kwh == 2.0
     )
-    # 12 quarters x 0.15 kWh into the pack, grossed up by charge efficiency
-    assert cheap == pytest.approx(12 * 0.15 / CHARGE_EFF, abs=0.01)
+    assert cheap == pytest.approx(4 * step / CHARGE_EFF, abs=0.01)
+    # the rest had to be bought dearer, which is the point
+    assert sum(p.grid_charge_kwh for p in plan.periods) > cheap + 0.01
     assert peak_soc(plan, params) == pytest.approx(100.0, abs=0.5)
 
 
@@ -175,7 +182,8 @@ def test_short_trough_costs_more_than_a_wide_one():
             - solve_lp(periods, params).total_cost_cents
         )
 
-    narrow = premium([20.0] * 3 + [2.0] * 3 + [20.0] * 18)
+    # one cheap hour: shorter than the charge needs even at 2.5 kW
+    narrow = premium([20.0] * 3 + [2.0] * 1 + [20.0] * 20)
     wide = premium(CHEAP_NIGHT)
     assert narrow > wide
 

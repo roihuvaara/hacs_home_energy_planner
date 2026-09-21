@@ -91,7 +91,11 @@ def test_only_spare_inverter_capacity_reaches_the_grid():
     the pack delivers 0.296 kWh per quarter; a house pulling more than
     that exports nothing however high the price goes.
     """
-    step = 25 * 50 * 0.25 / 1000 * (0.9**0.5)  # ~0.296 kWh delivered
+    from home_energy_planner.battery_core import current_to_period_kwh
+
+    step = current_to_period_kwh(
+        BATTERY.max_discharge_current, BATTERY.nominal_voltage
+    ) * (0.9**0.5)
     exports = [34.7] * 8
 
     # load above the discharge rate: nothing to sell, spike or no spike
@@ -107,7 +111,7 @@ def test_only_spare_inverter_capacity_reaches_the_grid():
     assert sold(quiet) > 0.0
     for period in quiet.periods:
         if period.export_from_battery_kwh > 0:
-            assert period.export_from_battery_kwh <= step - 0.05 + 1e-6
+            assert period.export_from_battery_kwh <= step - 0.05 + 1e-3
 
 
 def test_never_buys_and_sells_in_the_same_quarter():

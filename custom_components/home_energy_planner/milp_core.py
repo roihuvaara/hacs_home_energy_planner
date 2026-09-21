@@ -204,9 +204,12 @@ def solve_lp(
     capacity = battery.usable_above_reserve_kwh
     start_buffer = min(capacity, battery.buffer_kwh_from_soc(battery.soc_pct))
     charge_step = current_to_period_kwh(
-        min(battery.planned_charge_current, battery.max_charge_current)
+        min(battery.planned_charge_current, battery.max_charge_current),
+        battery.nominal_voltage,
     )
-    discharge_step = current_to_period_kwh(battery.max_discharge_current)
+    discharge_step = current_to_period_kwh(
+        battery.max_discharge_current, battery.nominal_voltage
+    )
 
     net_load = [max(0.0, p.load_kwh - p.solar_kwh) for p in periods]
     surplus = [max(0.0, p.solar_kwh - p.load_kwh) for p in periods]
@@ -481,9 +484,12 @@ def solve_joint(
     capacity = battery.usable_above_reserve_kwh
     start_buffer = min(capacity, battery.buffer_kwh_from_soc(battery.soc_pct))
     charge_step = current_to_period_kwh(
-        min(battery.planned_charge_current, battery.max_charge_current)
+        min(battery.planned_charge_current, battery.max_charge_current),
+        battery.nominal_voltage,
     )
-    discharge_step = current_to_period_kwh(battery.max_discharge_current)
+    discharge_step = current_to_period_kwh(
+        battery.max_discharge_current, battery.nominal_voltage
+    )
     net_load = [max(0.0, p.load_kwh - p.solar_kwh) for p in periods]
     surplus = [max(0.0, p.solar_kwh - p.load_kwh) for p in periods]
     price = [p.price_cents_per_kwh for p in periods]

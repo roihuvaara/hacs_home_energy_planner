@@ -19,6 +19,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .battery_core import (
+    BATTERY_NOMINAL_VOLTAGE,
     PERIOD_MINUTES,
     BatteryParams,
     DispatchPlan,
@@ -53,6 +54,10 @@ DEFAULTS = {
     "solar_today_entity": "sensor.energy_production_today_remaining",
     "solar_tomorrow_entity": "sensor.energy_production_tomorrow",
     "battery_capacity_kwh": 5.12,
+    # HIGH VOLTAGE pack (~204.7 V live). Every rate in the planner is
+    # current x voltage, so this scales the whole model — see
+    # BATTERY_NOMINAL_VOLTAGE in battery_core for what assuming 50 V cost.
+    "battery_voltage_entity": "sensor.solis_battery_voltage",
     "battery_soh_pct": 97.0,
     "battery_engine": "lp",
     # battery -> grid selling. Permitted only where the export price
@@ -250,6 +255,21 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             return float(state.state)  # type: ignore[union-attr]
         except (AttributeError, TypeError, ValueError):
             return fallback
+
+    def battery_voltage(self) -> float:
+        """Live pack voltage, or the nominal fallback.
+
+        Read rather than assumed because it sets every rate in the model.
+        A reading far off nominal is a bad frame, not a new battery.
+        """
+        state = self.hass.states.get(str(self._option("battery_voltage_entity")))
+        try:
+            value = float(state.state)  # type: ignore[union-attr]
+        except (AttributeError, TypeError, ValueError):
+            return BATTERY_NOMINAL_VOLTAGE
+        low = 0.5 * BATTERY_NOMINAL_VOLTAGE
+        high = 1.5 * BATTERY_NOMINAL_VOLTAGE
+        return value if low <= value <= high else BATTERY_NOMINAL_VOLTAGE
 
     def tank_temp_c(self) -> float | None:
         """Live DHW tank temperature, or None when there isn't one.
@@ -456,6 +476,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             "state_of_health_pct": float(self._option("battery_soh_pct")),
             "soc_pct": self._float_state("battery_soc_entity", 0.0),
             "reserve_soc_pct": self._float_state("battery_reserve_entity", 18.0),
+            "nominal_voltage": self.battery_voltage(),
             "max_charge_current": int(self._float_state("battery_max_charge_entity", 25.0)),
             "max_discharge_current": int(
                 self._float_state("battery_max_discharge_entity", 25.0)
@@ -516,7 +537,8 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         from .battery_core import CHARGE_EFF, current_to_period_kwh
 
         charge_step = current_to_period_kwh(
-            min(battery.planned_charge_current, battery.max_charge_current)
+            min(battery.planned_charge_current, battery.max_charge_current),
+            battery.nominal_voltage,
         )
         start = min(
             battery.usable_above_reserve_kwh,

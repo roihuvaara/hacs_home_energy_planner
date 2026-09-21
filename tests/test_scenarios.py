@@ -122,8 +122,10 @@ def test_negative_prices_charge_at_full_rate_never_discharge():
     negative = window(plan, 10, 14)
     assert charged(negative) >= 1.5
     assert discharged(negative) == 0
-    # every negative-price quarter grid-charges at the planned rate
-    assert all(p.grid_charge_kwh > 0 for p in negative)
+    # It charges while being paid to, but "every negative quarter" no
+    # longer holds now the rate is right: at ~2.5 kW the pack is full
+    # long before a four-hour negative block ends.
+    assert any(p.grid_charge_kwh > 0 for p in negative)
 
 
 def test_negative_price_energy_serves_the_expensive_evening():
