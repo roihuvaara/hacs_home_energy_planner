@@ -462,6 +462,21 @@ def solve_joint(
         for t in draw_quarters:
             draw_c[t] = per_quarter_c
 
+    # Ceiling per quarter. max_c is where planned heating stops, NOT a
+    # physical limit: the tank arrives hotter than that on its own (solar
+    # dump, the heat pump's own DHW cycle, a manual boost). Bounding T at
+    # max_c then made the temperature equality unsatisfiable and took the
+    # WHOLE joint solve down as infeasible - tank plan gone, water heater
+    # silently back on the rule fallback - for any start above ~67.4 C.
+    # So the ceiling follows the coast-down from temp0 until it rejoins
+    # max_c: honest about where the tank is, still refusing to plan heat
+    # above the dump ceiling.
+    temp_ceiling: list[float] = []
+    coast = temp0
+    for _ in range(n):
+        coast = (1.0 - k_q) * coast + k_q * tank.ambient_c
+        temp_ceiling.append(max(tank.max_c, coast))
+
     solver = highspy.Highs()
     solver.silent()
 
@@ -513,7 +528,7 @@ def solve_joint(
         upper[si(t)] = capacity
         upper[ui(t)] = 1.0
         upper[ri(t)] = 1.0
-        upper[Ti(t)] = tank.max_c
+        upper[Ti(t)] = temp_ceiling[t]
         upper[wi(t)] = min(surplus[t], tank_kwh_q)
         upper[xi(t)] = _export_allowance(
             discharge_step, export[t], export_gate_cents

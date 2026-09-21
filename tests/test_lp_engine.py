@@ -339,3 +339,25 @@ def test_lp_export_accounting_consistent():
     assert all(p.export_kwh >= 0 for p in plan.periods)
     revenue = sum(p.export_kwh * 3.0 for p in plan.periods)
     assert plan.export_revenue_cents == pytest.approx(revenue, abs=0.1)
+
+
+def test_tank_hotter_than_the_dump_ceiling_still_solves():
+    """A hot tank must coast, not take the whole joint solve down.
+
+    max_c is where *planned* heating stops; the tank arrives above it on
+    its own (solar dump, the heat pump's own DHW cycle, a manual boost).
+    Bounding the temperature state at max_c made the dynamics equality
+    unsatisfiable for any start above ~67.4 C, and an infeasible joint
+    solve means no tank plan at all — seen live 2026-09-21, logged every
+    tick as "HiGHS joint solve: kInfeasible" while the water heater
+    quietly ran on the rule fallback.
+    """
+    periods = day([10.51] * 24, [0.4] * 24)
+    for temp0 in (55.0, 66.0, 68.0, 75.0):
+        plan, tank_plan = joint(periods, temp0=temp0)
+        assert plan.periods, f"{temp0} C produced no plan"
+        assert tank_plan.temp_c[0] <= max(66.0, temp0) + 1e-6
+    # and a hot start is planned to coast, never to heat further
+    _plan, hot = joint(periods, temp0=75.0)
+    assert hot.windows == []
+    assert hot.temp_c[0] < 75.0
