@@ -52,9 +52,14 @@ class IlpConfig:
     # dry mode also cools: never dry a room already at/below the bottom of
     # the 23-23.5 comfort band, not even past the hard humidity limit
     dry_room_floor: float = 23.0
-    # heating assist: trim the bottom of the comfort band when energy is
-    # cheap/free; the slab does the bulk. Thresholds anchored to the
-    # owner band (23-23.5) and protect_below_room lineage (22.8).
+    # Heating assist. The Versati/slab is the house's heat source; the
+    # ILP is a comfort backstop on top of it (owner, 2026-09-21: "house
+    # heat pump should be the preferred heat source, not ilp. ilp is
+    # comfort source more like"). So it heats when the room has actually
+    # fallen, or when the energy is free — never merely because power is
+    # cheap, which would have it pre-empt the slab on every cheap night.
+    # Thresholds anchored to the owner band (23-23.5) and the
+    # protect_below_room lineage (22.8).
     heat_room_min: float = 22.0  # heat at any price below this (comfort net)
     heat_room_below: float = 22.8  # heat when cool AND energy cheap/free
     heat_room_stop: float = 23.3  # keep heating until back here
@@ -145,11 +150,8 @@ def compute_ilp_action(
     if action == ACTION_OFF and room is not None and not inputs.slab_cooling:
         if room <= config.heat_room_min:
             action, reason = ACTION_HEAT, "room below hard min"
-        elif room <= config.heat_room_below and (surplus or cheap):
-            action, reason = (
-                ACTION_HEAT,
-                "cool room on surplus" if surplus else "cool room in cheap half",
-            )
+        elif room <= config.heat_room_below and surplus:
+            action, reason = ACTION_HEAT, "cool room on surplus"
         elif inputs.currently_heating and room < config.heat_room_stop:
             action, reason = ACTION_HEAT, "finishing heat run"
 

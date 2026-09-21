@@ -82,7 +82,14 @@ DEFAULTS = {
     "tank_loss_per_hour": 0.013,
     "tank_ambient_c": 21.0,
     "tank_min_c": 50.0,
+    # The dump ceiling stays at the device's 66. What keeps the tank off
+    # the resistive element is tank_efficient_max_c below: above ~60 the
+    # Versati stops using the heat pump (owner, 2026-09-21), so those
+    # degrees are priced rather than forbidden — anticipated demand can
+    # still buy them, ordinary days hover well under.
     "tank_max_c": 66.0,
+    "tank_efficient_max_c": 60.0,
+    "tank_resistive_cost_multiple": 3.0,
     "tank_daily_draw_kwh": 1.0,
     "tank_min_run_quarters": 3,
     "fuse_kw": 17.0,
@@ -221,6 +228,27 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             return float(state.state)  # type: ignore[union-attr]
         except (AttributeError, TypeError, ValueError):
             return fallback
+
+    def tank_temp_c(self) -> float | None:
+        """Live DHW tank temperature, or None when there isn't one.
+
+        Not ``_float_state``: its 0.0 fallback reaches the MILP looking
+        exactly like a real reading, and a 0 C tank makes the joint solve
+        infeasible — the tank plan then dies every tick with a misleading
+        "kInfeasible" while the "temperature unavailable" branch, the one
+        actually meant to handle this, can never fire. The Versati drops
+        off the network regularly enough (GreeTimeoutError) for that to
+        be the normal case, not an edge one. Seen live 2026-09-21.
+
+        The range is a sensor-dropout check, not a model parameter: a
+        real DHW tank is somewhere between freezing and boiling.
+        """
+        state = self.hass.states.get(str(self._option("tank_temp_entity")))
+        try:
+            value = float(state.state)  # type: ignore[union-attr]
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return value if 1.0 <= value <= 95.0 else None
 
     async def load_baseline_kwh_by_quarter(
         self, now: datetime
@@ -655,7 +683,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         # and predicted temperature trajectory for the water heater module
         tank_windows: list[dict[str, Any]] | None = None
         tank_plan = None
-        tank_temp = self._float_state("tank_temp_entity")
+        tank_temp = self.tank_temp_c()
         if engine == "lp" and tank_temp is not None:
             try:
                 from .milp_core import solve_joint

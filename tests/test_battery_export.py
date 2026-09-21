@@ -174,3 +174,40 @@ def test_higher_gate_never_sells_more(multiple):
     for period in plan.periods:
         if period.export_from_battery_kwh > 0:
             assert period.export_cents_per_kwh >= gate
+
+
+def test_a_small_spike_now_does_not_burn_the_cycle_a_big_one_needs():
+    """One pack, one cycle, two spikes: it waits for the one that pays.
+
+    Grid charging is disabled here so the stored kWh really is scarce —
+    with charging available the planner sells into BOTH spikes and is
+    right to, since it refills at the flat night price in between and
+    each window is rate-capped anyway. What this pins is the scarce
+    case: a 21.5 c/kWh window tonight against a 34.7 c/kWh window
+    tomorrow evening, big enough to take the whole pack.
+
+    Nothing in the model counts cycles, and it does not need to. A kWh
+    can only be sold once, so the objective reaches for the richer
+    window by itself; the cycle cost is paid once either way and cancels
+    out. The real limit is the horizon edge, not the arithmetic — a
+    spike beyond the last published day-ahead price cannot be waited for
+    because it is not known yet.
+    """
+    no_charging = BatteryParams(
+        capacity_kwh=5.12,
+        state_of_health_pct=100.0,
+        soc_pct=100.0,
+        reserve_soc_pct=18.0,
+        max_charge_current=0,
+        max_discharge_current=25,
+        planned_charge_current=0,
+    )
+    prices = [NIGHT] * 96
+    exports = [2.0] * 96
+    exports[8:16] = [21.5] * 8  # tonight: clears the gate, modestly
+    exports[80:96] = [34.7] * 16  # tomorrow evening: takes the whole pack
+    plan = solve_lp(horizon(prices, exports, load=0.05), no_charging, None, NIGHT * 2.0)
+    early = sum(p.export_from_battery_kwh for p in plan.periods[8:16])
+    late = sum(p.export_from_battery_kwh for p in plan.periods[80:96])
+    assert late > 0
+    assert early == 0, "sold into the small spike and had nothing left for the big one"

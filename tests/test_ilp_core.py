@@ -144,18 +144,30 @@ def test_dry_never_runs_below_room_floor():
     assert unknown.action == "off"
 
 
-def test_cold_room_heats_instead_of_dry():
-    # the full 2026-07-06 morning: 22.5 C, humid, cheap -> the right
-    # answer is heat, never dry
-    result = compute_ilp_action(
+def test_cold_room_never_dries():
+    # the full 2026-07-06 morning: 22.5 C, humid, cheap. Drying a room
+    # that is already cool is the one answer that is always wrong.
+    cheap = make_inputs(
+        room_temp=22.5,
+        room_humidity=53.0,
+        future_all_in=[10.0] + [14.0] * 95,
+    )
+    result = compute_ilp_action(cheap)
+    # cheap power alone no longer starts the ILP: the slab owns heating
+    # (owner, 2026-09-21), so this is left to the Versati
+    assert result.action == "off"
+    assert "below dry floor" in result.reason
+    # free energy still puts it to work
+    on_surplus = compute_ilp_action(
         make_inputs(
             room_temp=22.5,
             room_humidity=53.0,
+            grid_export_w=900.0,
             future_all_in=[10.0] + [14.0] * 95,
         )
     )
-    assert result.action == "heat"
-    assert result.target_temp == 23.5
+    assert on_surplus.action == "heat"
+    assert on_surplus.target_temp == 23.5
 
 
 def test_heat_assist_ladder():
@@ -164,15 +176,19 @@ def test_heat_assist_ladder():
     hard = compute_ilp_action(make_inputs(room_temp=21.8, future_all_in=expensive))
     assert hard.action == "heat"
     assert "hard min" in hard.reason
-    # assist band needs cheap or surplus
+    # inside the assist band it takes free energy only. Cheap grid power
+    # is NOT a reason to run: that had the ILP pre-empting the slab on
+    # every cheap night, and the slab is the house's heat source (owner,
+    # 2026-09-21 — the ILP is a comfort backstop on top of it).
     cheap = compute_ilp_action(
         make_inputs(room_temp=22.6, future_all_in=[10.0] + [14.0] * 95)
     )
-    assert cheap.action == "heat"
+    assert cheap.action == "off"
     surplus = compute_ilp_action(
         make_inputs(room_temp=22.6, grid_export_w=900.0, future_all_in=expensive)
     )
     assert surplus.action == "heat"
+    assert "surplus" in surplus.reason
     pricey = compute_ilp_action(make_inputs(room_temp=22.6, future_all_in=expensive))
     assert pricey.action == "off"
     # finishing: keep heating up to the stop line, then off
