@@ -24,7 +24,7 @@ def make_inputs(**overrides):
 def test_measured_export_selects_solar_boost():
     result = compute_water_heater_mode(make_inputs(grid_export_w=800.0))
     assert result.mode == "solar_boost"
-    assert result.target_temp == 60
+    assert result.target_temp == 58
     below = compute_water_heater_mode(make_inputs(grid_export_w=300.0))
     assert below.mode != "solar_boost"
 

@@ -96,7 +96,20 @@ DEFAULTS = {
     # answers with resistive heat from the bottom of the cycle, so a 66 C
     # window was buying the entire tank at COP ~1. Never write a setpoint
     # above what the heat pump can deliver.
-    "tank_max_c": 60.0,
+    #
+    # 58 rather than 60 for two reasons. COP keeps falling as the tank
+    # approaches the compressor's limit (owner's manufacturer figures,
+    # unconfirmed, in ha/docs/integrations/gree-versati-dhw-facts.md), so
+    # lower is better where comfort allows. And the exact temperature at
+    # which the element cuts in is NOT known to be 60 — a margin protects
+    # the fix above. Comfort is unaffected: swept 57-60 C over four
+    # starting temperatures, the comfort-floor slack is identical (0.61,
+    # and only on a cold start, so it is a cold-start artifact rather
+    # than the ceiling), mean tank temp stays 54.0-54.5 at every ceiling,
+    # and 58 holds the floor marginally better than 60 (min 50.19 vs
+    # 49.93). It costs about half a heating run per day and takes the
+    # peak from 59.1 to 57.6.
+    "tank_max_c": 58.0,
     "tank_efficient_max_c": 60.0,
     "tank_resistive_cost_multiple": 3.0,
     "tank_daily_draw_kwh": 1.0,

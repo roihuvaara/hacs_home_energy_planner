@@ -283,8 +283,11 @@ def test_joint_surplus_feeds_tank_as_dump_load():
         tank=tank,
         temp0=51.0,
     )
+    # Surplus VOLUME is the real discriminator. Peak temperature became a
+    # weak proxy once the ceiling dropped to 58: both cases now saturate
+    # against it, so they agree to within a rounding sliver.
     assert sum(rich_export.surplus_kwh) <= sum(tank_plan.surplus_kwh) + 1e-6
-    assert max(rich_export.temp_c) <= max(tank_plan.temp_c) + 0.01
+    assert max(rich_export.temp_c) <= max(tank_plan.temp_c) + 0.1
 
 
 def test_joint_solve_time_stays_fast():

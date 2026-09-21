@@ -107,7 +107,7 @@ def _options_schema(current: dict[str, Any]) -> vol.Schema:
                 "tank_min_c", default=_default("tank_min_c", 50.0)
             ): vol.Coerce(float),
             vol.Optional(
-                "tank_max_c", default=_default("tank_max_c", 60.0)
+                "tank_max_c", default=_default("tank_max_c", 58.0)
             ): vol.Coerce(float),
             vol.Optional(
                 "tank_daily_draw_kwh",

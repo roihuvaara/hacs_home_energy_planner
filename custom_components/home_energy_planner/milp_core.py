@@ -357,8 +357,9 @@ class TankParams:
     - daily_draw_kwh: electric-equivalent of actual DHW draws only —
       standing loss is modeled explicitly now, and loss alone accounts
       for most of the tank's measured ~3 kWh/day.
-    - min_c/max_c: owner comfort floor 50 C (2026-07-15), dump ceiling 60
-      — the heat pump's hot-water ceiling, NOT the device maximum (80).
+    - min_c/max_c: owner comfort floor 50 C (2026-07-15), dump ceiling 58
+      — under the heat pump's ~60 C hot-water limit, NOT the device
+      maximum (80).
       A window setpoint above it makes the Versati heat the whole tank
       with the immersion element instead; see battery_coordinator's
       tank_max_c for the measurement. The ceiling is what we may ask for,
@@ -375,7 +376,7 @@ class TankParams:
         loss_per_hour: float = 0.013,
         ambient_c: float = 21.0,
         min_c: float = 50.0,
-        max_c: float = 60.0,
+        max_c: float = 58.0,
         daily_draw_kwh: float = 1.0,
         min_run_quarters: int = 3,
         fuse_kw: float = 17.0,
