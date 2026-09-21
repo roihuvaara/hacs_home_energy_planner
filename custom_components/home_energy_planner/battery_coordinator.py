@@ -37,6 +37,13 @@ MODE_OFF = "off"
 MODE_OBSERVE = "observe"
 MODE_CONTROL = "control"
 
+# Below this multiple of the horizon's cheapest buy price a grid->buffer
+# ->grid round trip cannot clear round-trip losses plus cycle cost:
+# (p + eff*(cycle + sell fee)) / eff / p with 0.9 round trip and a
+# 4 c/kWh cycle works out at ~1.5x on this tariff. The option is clamped
+# up to it so "sell more eagerly" can never mean "sell at a loss".
+_EXPORT_MIN_MULTIPLE_FLOOR = 1.6
+
 DEFAULTS = {
     "battery_soc_entity": "sensor.solis_remaining_battery_capacity",
     "battery_reserve_entity": "number.inverter_control_110ca2228060121_battery_reserve_soc",
@@ -48,6 +55,16 @@ DEFAULTS = {
     "battery_capacity_kwh": 5.12,
     "battery_soh_pct": 97.0,
     "battery_engine": "lp",
+    # battery -> grid selling. Permitted only where the export price
+    # reaches export_min_multiple x the horizon's cheapest buy price.
+    # 2.0 was picked off 41 days of the owner's own realized spot
+    # (2026-08-12..09-20): a quarter above 2x the night price showed up
+    # on 10 % of days, 1.5x on 29 % - the latter is barely past
+    # break-even and would trade most weeks for pennies. Winter spikes
+    # should fire it more often at the same multiple, which is the point
+    # of scaling instead of fixing a cent figure.
+    "battery_export": True,
+    "export_min_multiple": 2.0,
     # daily-energy temperature model fitted 2026-07-06 on 182 days of
     # statistics vs Open-Meteo (R2 0.62 on heating days): expected
     # kWh/day = max(warm_floor, base + slope * T_out)
@@ -98,6 +115,7 @@ class BatteryPlanData:
         tank_plan: Any | None = None,
         tank_initial_temp: float | None = None,
         balance: dict[str, Any] | None = None,
+        export_gate_cents: float | None = None,
     ) -> None:
         self.plan = plan
         self.charge_slots = charge_slots
@@ -111,6 +129,7 @@ class BatteryPlanData:
         self.tank_plan = tank_plan
         self.tank_initial_temp = tank_initial_temp
         self.balance = balance
+        self.export_gate_cents = export_gate_cents
 
 
 class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
@@ -398,6 +417,25 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             values[key] = int(value) if key.startswith("max_") else float(value)
         return BatteryParams(**values)
 
+    def export_gate_cents(self, periods: list[Period]) -> float | None:
+        """Lowest export price at which selling the buffer is permitted.
+
+        Scaled to the horizon's own cheapest buy price rather than set in
+        cents, for the same reason the balance allowance is (memory:
+        derive thresholds from user data): the multiple keeps meaning the
+        same thing across a fixed-price winter and a spot summer. Below
+        ~1.55x a round trip does not even clear round-trip losses plus
+        cycle cost, so the multiple is floored there - the option tunes
+        how far above break-even a spike has to be, never whether the
+        planner may sell at a loss.
+        """
+        if not bool(self._option("battery_export")) or not periods:
+            return None
+        multiple = max(
+            _EXPORT_MIN_MULTIPLE_FLOOR, float(self._option("export_min_multiple"))
+        )
+        return min(p.price_cents_per_kwh for p in periods) * multiple
+
     def tank_params(self):
         """DHW tank physics from options (defaults measured, see TankParams)."""
         from .milp_core import TankParams
@@ -451,6 +489,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         engine: str,
         engine_option: str,
         now: datetime,
+        export_gate_cents: float | None = None,
     ) -> tuple[DispatchPlan, dict[str, Any], float | None]:
         """Decide whether this horizon carries the cell-balance charge.
 
@@ -512,7 +551,12 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
 
                 try:
                     balanced, _engine = await self.hass.async_add_executor_job(
-                        solve_best, periods, battery, engine_option, target_kwh
+                        solve_best,
+                        periods,
+                        battery,
+                        engine_option,
+                        target_kwh,
+                        export_gate_cents,
                     )
                     premium = balanced.total_cost_cents - plan.total_cost_cents
                 except Exception as err:  # noqa: BLE001 - plan survives this
@@ -594,12 +638,13 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
         from .milp_core import solve_best
 
         engine_option = str(self._option("battery_engine"))
+        export_gate = self.export_gate_cents(periods)
         plan, engine = await self.hass.async_add_executor_job(
-            solve_best, periods, battery, engine_option
+            solve_best, periods, battery, engine_option, None, export_gate
         )
 
         plan, balance_info, balance_target_kwh = await self._async_apply_balance(
-            periods, battery, plan, engine, engine_option, now
+            periods, battery, plan, engine, engine_option, now, export_gate
         )
 
         charge_slots, discharge_slots = compile_slots(
@@ -623,6 +668,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
                     tank_temp,
                     now.tzinfo,
                     balance_target_kwh,
+                    export_gate,
                 )
                 tank_windows = [
                     {
@@ -668,4 +714,7 @@ class BatteryCoordinator(DataUpdateCoordinator[BatteryPlanData]):
             tank_plan=tank_plan,
             tank_initial_temp=tank_temp,
             balance=balance_info,
+            export_gate_cents=(
+                None if export_gate is None else round(export_gate, 2)
+            ),
         )

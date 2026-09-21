@@ -43,6 +43,24 @@ def _balance_target(
     return min(float(min_peak_buffer_kwh), capacity)
 
 
+def _export_allowance(
+    discharge_step: float, export_cents: float, gate_cents: float | None
+) -> float:
+    """How much buffer may be sold to the grid in this quarter.
+
+    All-or-nothing on purpose: the gate decides *whether* selling is
+    permitted here, never what it is worth. Inside a permitted quarter
+    the objective compares selling against self-use on price alone (both
+    already carry the same cycle cost), which is the comparison the owner
+    cares about - with a fixed purchase price and a spot sell price, a
+    stored kWh belongs wherever it earns most, and the wear is sunk
+    either way. ``None`` disables selling entirely.
+    """
+    if gate_cents is None or export_cents < gate_cents:
+        return 0.0
+    return discharge_step
+
+
 def _add_balance_rows(solver, highspy, n: int, target: float, si, bi) -> None:
     """Require the buffer to reach ``target`` in at least one period.
 
@@ -66,6 +84,7 @@ def solve_best(
     battery: BatteryParams,
     engine: str = "lp",
     min_peak_buffer_kwh: float | None = None,
+    export_gate_cents: float | None = None,
 ) -> tuple[DispatchPlan, str]:
     """Solve with the requested engine, falling back LP -> DP.
 
@@ -76,7 +95,15 @@ def solve_best(
     """
     if engine == "lp":
         try:
-            return solve_lp(periods, battery, min_peak_buffer_kwh), "lp"
+            return (
+                solve_lp(
+                    periods,
+                    battery,
+                    min_peak_buffer_kwh,
+                    export_gate_cents,
+                ),
+                "lp",
+            )
         except Exception as err:  # noqa: BLE001 - DP fallback by design
             _LOGGER.warning("LP engine unavailable (%s); falling back to DP", err)
     from .battery_core import solve
@@ -88,15 +115,29 @@ def solve_lp(
     periods: list[Period],
     battery: BatteryParams,
     min_peak_buffer_kwh: float | None = None,
+    export_gate_cents: float | None = None,
 ) -> DispatchPlan:
     """Minimize import + cycle cost − export revenue; needs highspy.
 
     Export economics: absorbing surplus pays its forgone export value;
-    unabsorbed surplus earns ``export_cents_per_kwh``. Discharge-to-export
-    is deliberately NOT modeled (``d`` stays capped at net load): with
-    ~0.9 round-trip and 4 c/kWh cycle cost, selling at spot never clears
-    the FI all-in import spread, and the export switch itself is still
-    unprobed (todo 002).
+    unabsorbed surplus earns ``export_cents_per_kwh``.
+
+    Discharge-to-export (``x``) is modeled when ``export_gate_cents`` is
+    given: the buffer may be sold to the grid in any quarter whose export
+    compensation reaches the gate. It was long left out on the argument
+    that selling at spot never clears the all-in import spread - true
+    only while the purchase price tracks spot too. Under a fixed-price
+    contract the two decouple and the spikes are pure margin, so the
+    decision belongs in the objective.
+
+    ``x`` carries exactly the same cycle cost as ``d``: once a kWh is
+    stored the wear is sunk, so "self-use now vs sell later" is a clean
+    price comparison - sell whenever the compensation beats the import
+    price it would otherwise displace. The gate is deliberately NOT a
+    cost for that reason; taxing ``x`` would bias that comparison back
+    toward self-use. It is a hard permission, sized by the caller against
+    the horizon's cheapest buy price, and its only job is to keep
+    round-trips to clear spikes. ``d + x`` share the discharge rate.
 
     ``min_peak_buffer_kwh`` adds the cell-balance constraint: the buffer
     must reach that level in at least ONE period of the horizon. It is a
@@ -138,7 +179,8 @@ def solve_lp(
     inf = highspy.kHighsInf
 
     # variable layout per period: g (grid->buffer), a (solar->buffer),
-    # d (buffer drain); plus s (buffer state) for periods 1..n
+    # d (buffer drain) interleaved; then one block each for s (buffer
+    # state), x (buffer->grid) and the optional balance selector
     def gi(t: int) -> int:
         return 3 * t
 
@@ -151,12 +193,15 @@ def solve_lp(
     def si(t: int) -> int:  # state AFTER period t
         return 3 * n + t
 
-    def bi(t: int) -> int:  # "the balance peak lands here" selector
+    def xi(t: int) -> int:  # buffer -> grid (sold)
         return 4 * n + t
+
+    def bi(t: int) -> int:  # "the balance peak lands here" selector
+        return 5 * n + t
 
     balance_target = _balance_target(min_peak_buffer_kwh, capacity)
     balancing = balance_target is not None
-    num_vars = (5 if balancing else 4) * n
+    num_vars = (6 if balancing else 5) * n
     lower = [0.0] * num_vars
     upper = [0.0] * num_vars
     cost = [0.0] * num_vars
@@ -165,12 +210,17 @@ def solve_lp(
         upper[ai(t)] = surplus[t] * CHARGE_EFF
         upper[di(t)] = min(discharge_step, net_load[t] / DISCHARGE_EFF)
         upper[si(t)] = capacity
+        upper[xi(t)] = _export_allowance(
+            discharge_step, export[t], export_gate_cents
+        )
         if balancing:
             upper[bi(t)] = 1.0
         # import cost: grid charge buys g/eff at price; discharge saves
         # d*eff of load at price but pays cycle cost on delivered energy
         cost[gi(t)] = price[t] / CHARGE_EFF
         cost[di(t)] = DISCHARGE_EFF * (CYCLE_COST_CENTS_PER_KWH - price[t])
+        # selling: same cycle cost, revenue in place of avoided import
+        cost[xi(t)] = DISCHARGE_EFF * (CYCLE_COST_CENTS_PER_KWH - export[t])
         # absorbing surplus forgoes exporting it (a_t is battery-side, so
         # a_t/eff of exportable kWh is consumed); the tiny epsilon keeps
         # zero-export-price ties resolving like the DP (capture solar).
@@ -183,15 +233,18 @@ def solve_lp(
     if balancing:
         _add_balance_rows(solver, highspy, n, balance_target, si, bi)
 
-    # state balance: s_t - s_{t-1} - g_t - a_t + d_t = 0
+    # state balance: s_t - s_{t-1} - g_t - a_t + d_t + x_t = 0
     for t in range(n):
-        idx = [si(t), gi(t), ai(t), di(t)]
-        coef = [1.0, -1.0, -1.0, 1.0]
+        idx = [si(t), gi(t), ai(t), di(t), xi(t)]
+        coef = [1.0, -1.0, -1.0, 1.0, 1.0]
         rhs = start_buffer if t == 0 else 0.0
         if t > 0:
             idx.append(si(t - 1))
             coef.append(-1.0)
         solver.addRow(rhs, rhs, len(idx), idx, coef)
+        # one inverter: self-use and selling share the discharge rate
+        if upper[xi(t)] > 0.0:
+            solver.addRow(-inf, discharge_step, 2, [di(t), xi(t)], [1.0, 1.0])
 
     solver.run()
     status = solver.getModelStatus()
@@ -208,21 +261,25 @@ def solve_lp(
         g = max(0.0, values[gi(t)])
         a = max(0.0, values[ai(t)])
         d = max(0.0, values[di(t)])
+        x = max(0.0, values[xi(t)])
         buffer_end = max(0.0, values[si(t)])
         deliver = d * DISCHARGE_EFF
+        sold = x * DISCHARGE_EFF
         grid_charge = g / CHARGE_EFF
         grid_import = max(0.0, net_load[t] - deliver) + grid_charge
-        export_kwh = max(0.0, surplus[t] - a / CHARGE_EFF)
+        export_kwh = max(0.0, surplus[t] - a / CHARGE_EFF) + sold
         # baseline = no battery: all load imported, all surplus exported
         baseline += net_load[t] * price[t] - surplus[t] * export[t]
         total += (
             grid_import * price[t]
-            + deliver * CYCLE_COST_CENTS_PER_KWH
+            + (deliver + sold) * CYCLE_COST_CENTS_PER_KWH
             - export_kwh * export[t]
         )
         export_revenue += export_kwh * export[t]
         if g > _EPS:
             action = "charge"
+        elif x > _EPS:
+            action = "export"
         elif d > _EPS:
             action = "self_use"
         else:
@@ -238,6 +295,8 @@ def solve_lp(
                 grid_import_kwh=round(grid_import, 3),
                 price_cents_per_kwh=price[t],
                 export_kwh=round(export_kwh, 3),
+                export_from_battery_kwh=round(sold, 3),
+                export_cents_per_kwh=export[t],
             )
         )
         buffer = buffer_end
@@ -328,6 +387,7 @@ def solve_joint(
     initial_temp_c: float | None = None,
     local_tz: tzinfo | None = None,
     min_peak_buffer_kwh: float | None = None,
+    export_gate_cents: float | None = None,
 ) -> tuple[DispatchPlan, TankPlan]:
     """Co-optimize battery dispatch and the DHW tank as a thermal battery.
 
@@ -346,8 +406,11 @@ def solve_joint(
     cell-balance constraint exactly as in ``solve_lp``; passing it here
     too keeps the tank windows consistent with a horizon where the
     battery is grid-charging, which matters most for the fuse cap.
-    Returns the battery dispatch plan plus a TankPlan (run windows,
-    predicted temperature trajectory).
+    ``export_gate_cents`` enables battery-to-grid selling exactly as in
+    ``solve_lp``; here it also competes with the tank for the same
+    surplus and the same spike, which is the point of solving them
+    together. Returns the battery dispatch plan plus a TankPlan (run
+    windows, predicted temperature trajectory).
     """
     import highspy
 
@@ -431,12 +494,15 @@ def solve_joint(
         # solver camp below the floor forever)
         return 8 * n + t
 
-    def bi(t):  # "the balance peak lands here" selector
+    def xi(t):  # buffer -> grid (sold)
         return 9 * n + t
+
+    def bi(t):  # "the balance peak lands here" selector
+        return 10 * n + t
 
     balance_target = _balance_target(min_peak_buffer_kwh, capacity)
     balancing = balance_target is not None
-    num_vars = (10 if balancing else 9) * n
+    num_vars = (11 if balancing else 10) * n
     lower = [0.0] * num_vars
     upper = [0.0] * num_vars
     cost = [0.0] * num_vars
@@ -449,8 +515,13 @@ def solve_joint(
         upper[ri(t)] = 1.0
         upper[Ti(t)] = tank.max_c
         upper[wi(t)] = min(surplus[t], tank_kwh_q)
+        upper[xi(t)] = _export_allowance(
+            discharge_step, export[t], export_gate_cents
+        )
         cost[gi(t)] = price[t] / CHARGE_EFF
         cost[di(t)] = DISCHARGE_EFF * (CYCLE_COST_CENTS_PER_KWH - price[t])
+        # selling: same cycle cost, revenue in place of avoided import
+        cost[xi(t)] = DISCHARGE_EFF * (CYCLE_COST_CENTS_PER_KWH - export[t])
         # forgone export on absorbed surplus, mirroring solve_lp
         cost[ai(t)] = export[t] / CHARGE_EFF - 1e-6
         # a run buys grid energy unless fed from surplus: w swaps grid
@@ -479,13 +550,16 @@ def solve_joint(
     inf = highspy.kHighsInf
     for t in range(n):
         # battery state balance
-        idx = [si(t), gi(t), ai(t), di(t)]
-        coef = [1.0, -1.0, -1.0, 1.0]
+        idx = [si(t), gi(t), ai(t), di(t), xi(t)]
+        coef = [1.0, -1.0, -1.0, 1.0, 1.0]
         rhs = start_buffer if t == 0 else 0.0
         if t > 0:
             idx.append(si(t - 1))
             coef.append(-1.0)
         solver.addRow(rhs, rhs, len(idx), idx, coef)
+        # one inverter: self-use and selling share the discharge rate
+        if upper[xi(t)] > 0.0:
+            solver.addRow(-inf, discharge_step, 2, [di(t), xi(t)], [1.0, 1.0])
         # run start linking: r_t >= u_t - u_{t-1}
         if t == 0:
             solver.addRow(0.0, inf, 2, [ri(0), ui(0)], [1.0, -1.0])
@@ -542,22 +616,32 @@ def solve_joint(
         g = max(0.0, values[gi(t)])
         a = max(0.0, values[ai(t)])
         d = max(0.0, values[di(t)])
+        x = max(0.0, values[xi(t)])
         w = max(0.0, values[wi(t)])
         buffer_end = max(0.0, values[si(t)])
         deliver = d * DISCHARGE_EFF
+        sold = x * DISCHARGE_EFF
         grid_charge = g / CHARGE_EFF
         grid_import = max(0.0, net_load[t] - deliver) + grid_charge
-        export_kwh = max(0.0, surplus[t] - a / CHARGE_EFF - w)
+        export_kwh = max(0.0, surplus[t] - a / CHARGE_EFF - w) + sold
         baseline += net_load[t] * price[t] - surplus[t] * export[t]
         total += (
             grid_import * price[t]
-            + deliver * CYCLE_COST_CENTS_PER_KWH
+            + (deliver + sold) * CYCLE_COST_CENTS_PER_KWH
             - export_kwh * export[t]
         )
         export_revenue += export_kwh * export[t]
         on = values[ui(t)] > 0.5
         tank_cost += (tank_kwh_q * (1.0 if on else 0.0) - w) * price[t] + w * export[t]
-        action = "charge" if g > _EPS else "self_use" if d > _EPS else "hold"
+        action = (
+            "charge"
+            if g > _EPS
+            else "export"
+            if x > _EPS
+            else "self_use"
+            if d > _EPS
+            else "hold"
+        )
         plans.append(
             PeriodPlan(
                 start=period.start,
@@ -569,6 +653,8 @@ def solve_joint(
                 grid_import_kwh=round(grid_import, 3),
                 price_cents_per_kwh=price[t],
                 export_kwh=round(export_kwh, 3),
+                export_from_battery_kwh=round(sold, 3),
+                export_cents_per_kwh=export[t],
             )
         )
         buffer = buffer_end

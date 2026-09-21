@@ -33,7 +33,7 @@ CYCLE_COST_CENTS_PER_KWH = 4.0
 # to protect and the DP labels ties "hold", producing noise slots.
 MIN_HOLD_BUFFER_KWH = 0.25
 
-Action = Literal["charge", "hold", "self_use"]
+Action = Literal["charge", "hold", "self_use", "export"]
 
 
 @dataclass(frozen=True)
@@ -95,7 +95,12 @@ class PeriodPlan:
     discharge_to_load_kwh: float
     grid_import_kwh: float
     price_cents_per_kwh: float
+    # total kWh leaving the meter this period (surplus PV + anything the
+    # LP chose to sell out of the buffer)
     export_kwh: float = 0.0
+    # the buffer's share of it: a forced discharge into a price spike
+    export_from_battery_kwh: float = 0.0
+    export_cents_per_kwh: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -248,7 +253,8 @@ def _windows(plans: list[PeriodPlan], action: Action) -> list[list[PeriodPlan]]:
     run: list[PeriodPlan] = []
     for plan in plans:
         if plan.action == action and (
-            action != "charge" or plan.grid_charge_kwh > 0
+            (action != "charge" or plan.grid_charge_kwh > 0)
+            and (action != "export" or plan.export_from_battery_kwh > 0)
         ):
             if run and plan.start - run[-1].start != timedelta(minutes=PERIOD_MINUTES):
                 windows.append(run)
@@ -265,7 +271,19 @@ def _windows(plans: list[PeriodPlan], action: Action) -> list[list[PeriodPlan]]:
 def _window_value(window: list[PeriodPlan], action: Action) -> float:
     if action == "charge":
         return sum(p.grid_charge_kwh for p in window)
+    if action == "export":
+        return sum(
+            p.export_from_battery_kwh * p.export_cents_per_kwh for p in window
+        )
     return sum(p.price_cents_per_kwh for p in window) * len(window)
+
+
+# Slot-table priority when windows compete for the 6 slots a side (or
+# collide across sides). Values are not comparable between actions -
+# charge is kWh, hold is a price sum - so rank by tier first and keep
+# each tier's own ordering. Selling into a spike is the one window with
+# money directly attached to it, so it never loses a slot to a hold.
+_ACTION_PRIORITY = {"export": 2, "charge": 1, "hold": 0}
 
 
 def compile_slots(
@@ -277,7 +295,10 @@ def compile_slots(
     """Compile the period plan into non-overlapping Solis slot tables.
 
     Hold windows become enabled 0 A discharge slots; charge windows get the
-    minimum current that still fits the planned energy. Windows are ranked
+    minimum current that still fits the planned energy; export windows
+    become enabled discharge slots at the current the sale needs, with
+    the SoC the window is planned to end at as the stop floor (the
+    inverter owns the last few percent, as with charge slots). Windows are ranked
     by value and dropped (never truncated) when they exceed 6 per side or
     would collide wall-clock with a higher-value window on the other side —
     Solis slots recur daily, so cross-side overlap is a real conflict.
@@ -325,11 +346,32 @@ def compile_slots(
             )
             soc = int(min(100, round(battery.soc_from_buffer_kwh(window[-1].buffer_end_kwh))))
             return SlotSpec(time=time, enabled=True, current=amps, soc=soc)
+        if action == "export":
+            energy = sum(p.export_from_battery_kwh for p in window)
+            hours = len(window) * PERIOD_HOURS
+            amps = max(
+                1,
+                min(
+                    battery.max_discharge_current,
+                    int(
+                        energy
+                        / DISCHARGE_EFF
+                        / hours
+                        / BATTERY_NOMINAL_VOLTAGE
+                        * 1000
+                        + 0.999
+                    ),
+                ),
+            )
+            soc = int(
+                min(100, round(battery.soc_from_buffer_kwh(window[-1].buffer_end_kwh)))
+            )
+            return SlotSpec(time=time, enabled=True, current=amps, soc=soc)
         soc = int(min(100, round(battery.soc_from_buffer_kwh(window[0].buffer_start_kwh))))
         return SlotSpec(time=time, enabled=True, current=0, soc=soc)
 
-    candidates: list[tuple[float, str, SlotSpec]] = []
-    for action in ("charge", "hold"):
+    candidates: list[tuple[int, float, str, SlotSpec]] = []
+    for action in ("charge", "hold", "export"):
         for window in _windows(plans, action):  # type: ignore[arg-type]
             if action == "hold" and (
                 max(max(p.buffer_start_kwh, p.buffer_end_kwh) for p in window)
@@ -340,6 +382,7 @@ def compile_slots(
                 continue
             candidates.append(
                 (
+                    _ACTION_PRIORITY[action],
                     _window_value(window, action),  # type: ignore[arg-type]
                     action,
                     to_slot(window, action),  # type: ignore[arg-type]
@@ -348,7 +391,9 @@ def compile_slots(
 
     charge: list[SlotSpec] = []
     discharge: list[SlotSpec] = []
-    for _value, action, slot in sorted(candidates, key=lambda c: -c[0]):
+    for _tier, _value, action, slot in sorted(
+        candidates, key=lambda c: (-c[0], -c[1])
+    ):
         target, other = (charge, discharge) if action == "charge" else (discharge, charge)
         if len(target) >= max_slots:
             continue

@@ -177,13 +177,37 @@ class BatteryPlanSensor(CoordinatorEntity[BatteryCoordinator], SensorEntity):
                     "action": p.action,
                     "grid_charge_kwh": p.grid_charge_kwh,
                     "discharge_kwh": p.discharge_to_load_kwh,
+                    "sell_kwh": p.export_from_battery_kwh,
                     "price": p.price_cents_per_kwh,
+                    "export_price": p.export_cents_per_kwh,
                 }
                 for p in plan.periods
                 if p.action != "hold" or p.grid_charge_kwh > 0
             ][:64],
             "last_apply_success": (data.applied or {}).get("success"),
             "export_revenue_cents": plan.export_revenue_cents,
+            "sell_plan": {
+                "gate_cents": data.export_gate_cents,
+                "kwh": round(
+                    sum(p.export_from_battery_kwh for p in plan.periods), 3
+                ),
+                "revenue_cents": round(
+                    sum(
+                        p.export_from_battery_kwh * p.export_cents_per_kwh
+                        for p in plan.periods
+                    ),
+                    2,
+                ),
+                "windows": [
+                    {
+                        "start": p.start.isoformat(),
+                        "kwh": p.export_from_battery_kwh,
+                        "price": p.export_cents_per_kwh,
+                    }
+                    for p in plan.periods
+                    if p.export_from_battery_kwh > 0
+                ],
+            },
             "cell_balance": data.balance,
             # aligned quarter-hour series for dashboard plotting
             "series": {

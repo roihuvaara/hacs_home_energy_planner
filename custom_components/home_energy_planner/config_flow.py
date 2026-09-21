@@ -90,6 +90,13 @@ def _options_schema(current: dict[str, Any]) -> vol.Schema:
                 "ilp_mode", default=_default("ilp_mode", "observe")
             ): vol.In(["off", "observe", "control"]),
             vol.Optional(
+                "battery_export", default=_default("battery_export", True)
+            ): bool,
+            vol.Optional(
+                "export_min_multiple",
+                default=_default("export_min_multiple", 2.0),
+            ): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=10.0)),
+            vol.Optional(
                 "contracts_json", default=_default("contracts_json", "")
             ): str,
             vol.Optional(
