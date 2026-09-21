@@ -87,7 +87,16 @@ DEFAULTS = {
     # Versati stops using the heat pump (owner, 2026-09-21), so those
     # degrees are priced rather than forbidden — anticipated demand can
     # still buy them, ordinary days hover well under.
-    "tank_max_c": 66.0,
+    # 60 C is the heat pump's ceiling for hot water, and asking for more
+    # does not just cost more - it changes which heater runs. Measured
+    # 2026-09-21 from three runs: the planner wrote the heat-window
+    # setpoint 50 -> 66 and the immersion element came on ~30 s later,
+    # with the tank still in the low 50s, and stayed on for the WHOLE
+    # rise. The Versati sees a target its compressor cannot reach and
+    # answers with resistive heat from the bottom of the cycle, so a 66 C
+    # window was buying the entire tank at COP ~1. Never write a setpoint
+    # above what the heat pump can deliver.
+    "tank_max_c": 60.0,
     "tank_efficient_max_c": 60.0,
     "tank_resistive_cost_multiple": 3.0,
     "tank_daily_draw_kwh": 1.0,

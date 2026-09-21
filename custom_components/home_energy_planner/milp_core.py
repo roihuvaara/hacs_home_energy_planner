@@ -29,6 +29,37 @@ _LOGGER = logging.getLogger(__name__)
 
 _EPS = 1e-6
 
+# The joint solve is a MIP and its runtime is branching luck, not a clean
+# function of the inputs: on one live horizon, tank ceilings of 66 / 62 /
+# 60 / 58 C took 3.9 / 7.3 / 4.7 / 47.7 s. A pathological horizon must not
+# hold up a tick, and it does not have to - this is an MPC that re-solves
+# every 15 minutes, so a good incumbent now beats a proven optimum late.
+JOINT_TIME_LIMIT_S = 8.0
+JOINT_MIP_REL_GAP = 0.005
+
+
+def _accept_mip(solver, highspy, label: str) -> None:
+    """Raise unless the solve produced a usable solution.
+
+    kOptimal is the normal case; kTimeLimit is fine too, but only when an
+    incumbent actually exists - a timed-out solve with no feasible point
+    is as useless as an infeasible one.
+    """
+    status = solver.getModelStatus()
+    if status == highspy.HighsModelStatus.kOptimal:
+        return
+    feasible = (
+        solver.getInfo().primal_solution_status
+        == highspy.kSolutionStatusFeasible
+    )
+    if status == highspy.HighsModelStatus.kTimeLimit and feasible:
+        _LOGGER.debug(
+            "%s hit the %.0f s limit; using the incumbent", label,
+            JOINT_TIME_LIMIT_S,
+        )
+        return
+    raise RuntimeError(f"{label}: {status}")
+
 
 def _balance_target(
     min_peak_buffer_kwh: float | None, capacity: float
@@ -326,8 +357,14 @@ class TankParams:
     - daily_draw_kwh: electric-equivalent of actual DHW draws only —
       standing loss is modeled explicitly now, and loss alone accounts
       for most of the tank's measured ~3 kWh/day.
-    - min_c/max_c: owner comfort floor 50 C (2026-07-15), dump ceiling 66
-      (device max 80 verified).
+    - min_c/max_c: owner comfort floor 50 C (2026-07-15), dump ceiling 60
+      — the heat pump's hot-water ceiling, NOT the device maximum (80).
+      A window setpoint above it makes the Versati heat the whole tank
+      with the immersion element instead; see battery_coordinator's
+      tank_max_c for the measurement. The ceiling is what we may ask for,
+      not a limit on how hot the tank gets: it still arrives hotter on
+      its own, and the temperature bound follows the coast-down when it
+      does.
     """
 
     def __init__(
@@ -338,7 +375,7 @@ class TankParams:
         loss_per_hour: float = 0.013,
         ambient_c: float = 21.0,
         min_c: float = 50.0,
-        max_c: float = 66.0,
+        max_c: float = 60.0,
         daily_draw_kwh: float = 1.0,
         min_run_quarters: int = 3,
         fuse_kw: float = 17.0,
@@ -479,6 +516,8 @@ def solve_joint(
 
     solver = highspy.Highs()
     solver.silent()
+    solver.setOptionValue("time_limit", JOINT_TIME_LIMIT_S)
+    solver.setOptionValue("mip_rel_gap", JOINT_MIP_REL_GAP)
 
     def gi(t):
         return 3 * t
@@ -617,8 +656,7 @@ def solve_joint(
         )
 
     solver.run()
-    if solver.getModelStatus() != highspy.HighsModelStatus.kOptimal:
-        raise RuntimeError(f"HiGHS joint solve: {solver.getModelStatus()}")
+    _accept_mip(solver, highspy, "HiGHS joint solve")
     values = list(solver.getSolution().col_value)
 
     plans: list[PeriodPlan] = []

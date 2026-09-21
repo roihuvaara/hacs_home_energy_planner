@@ -17,7 +17,10 @@ the legacy absolute-threshold rules.
   Hold triggers when the current price is meaningfully above the median;
   flat days just run normal.
 
-Mode targets (device mapping, unchanged): 66/60/55/51 C.
+Mode targets: 60/58/55/51 C. Nothing asks for the device's 66 any more
+— a setpoint above the heat pump's ~60 C hot-water ceiling makes the
+Versati run the immersion element for the whole cycle (measured
+2026-09-21; see battery_coordinator's tank_max_c).
 No Home Assistant imports; unit-testable standalone.
 """
 
@@ -81,8 +84,8 @@ def normalized_power(operation_mode: str | None) -> str | None:
 class WaterHeaterConfig:
     targets: dict[str, int] = field(
         default_factory=lambda: {
-            MODE_SOLAR_BOOST: 66,
-            MODE_CHEAP_BOOST: 60,
+            MODE_SOLAR_BOOST: 60,
+            MODE_CHEAP_BOOST: 58,
             MODE_NORMAL: 55,
             MODE_HOLD: 51,
         }

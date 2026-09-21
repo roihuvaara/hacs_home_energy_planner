@@ -274,7 +274,9 @@ def test_joint_surplus_feeds_tank_as_dump_load():
     periods = day(prices, [0.2] * 24, bell(14.0), export_cents=0.5)
     _plan, tank_plan = joint(periods, tank=tank, temp0=51.0)
     assert sum(tank_plan.surplus_kwh) > 1.0
-    assert max(tank_plan.temp_c) > 60.0
+    # driven to the ceiling — which is now the heat pump's 60 C, not the
+    # device's 66, so the bar is "reaches the ceiling", not a bare number
+    assert max(tank_plan.temp_c) > tank.max_c - 1.0
     # high export value attenuates the dump: selling beats storing heat
     _plan2, rich_export = joint(
         day(prices, [0.2] * 24, bell(14.0), export_cents=12.0),
@@ -294,8 +296,13 @@ def test_joint_solve_time_stays_fast():
     periods = day(prices, [0.5] * 48, None)
     started = time.monotonic()
     joint(periods, tank=TankParams(), temp0=55.0)
-    # runs in an executor once per 15-min tick; 5 s is ample headroom
-    assert time.monotonic() - started < 5.0
+    # Runs in an executor once per 15-min tick. The bound is the solver's
+    # own time limit plus slack, not a guess: MIP runtime is branching
+    # luck (66/62/60/58 C ceilings measured at 3.9/7.3/4.7/47.7 s on one
+    # live horizon), so solve_joint caps itself and takes the incumbent.
+    from home_energy_planner.milp_core import JOINT_TIME_LIMIT_S
+
+    assert time.monotonic() - started < JOINT_TIME_LIMIT_S + 3.0
 
 
 # --- export economics (LP only; DP stays export-blind by design) -------------
