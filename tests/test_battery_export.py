@@ -83,18 +83,40 @@ def test_sells_into_a_clear_spike():
     assert all(p.action == "export" for p in plan.periods[8:] if p.export_from_battery_kwh > 0)
 
 
-def test_selling_beats_self_use_at_the_spike():
-    """The owner's rule: the cycle is sunk, so send the kWh where it pays.
+def test_only_spare_inverter_capacity_reaches_the_grid():
+    """One meter: the house is served first, the leftover is the sale.
 
-    Same stored energy, same cycle cost either way; exporting at 34.7
-    beats displacing a 12.50 import, so the plan should sell rather than
-    self-use even though there is load to cover.
+    Discharge and load net out inside the interval, so what can be sold
+    is the inverter's rate MINUS the load, not its rate. At 25 A / 50 V
+    the pack delivers 0.296 kWh per quarter; a house pulling more than
+    that exports nothing however high the price goes.
     """
-    prices = [DAY] * 8
+    step = 25 * 50 * 0.25 / 1000 * (0.9**0.5)  # ~0.296 kWh delivered
     exports = [34.7] * 8
-    plan = solve_lp(horizon(prices, exports, load=0.3), BATTERY, None, DAY * 2.0)
-    assert sold(plan) > 0.0
-    assert sum(p.discharge_to_load_kwh for p in plan.periods) == 0.0
+
+    # load above the discharge rate: nothing to sell, spike or no spike
+    hungry = solve_lp(
+        horizon([DAY] * 8, exports, load=step + 0.1), BATTERY, None, DAY * 2.0
+    )
+    assert sold(hungry) == 0.0
+
+    # load well under it: the spare capacity goes to the grid
+    quiet = solve_lp(
+        horizon([DAY] * 8, exports, load=0.05), BATTERY, None, DAY * 2.0
+    )
+    assert sold(quiet) > 0.0
+    for period in quiet.periods:
+        if period.export_from_battery_kwh > 0:
+            assert period.export_from_battery_kwh <= step - 0.05 + 1e-6
+
+
+def test_never_buys_and_sells_in_the_same_quarter():
+    """Importing while exporting is two numbers that cancel, not a trade."""
+    prices = [NIGHT] * 8
+    exports = [34.7] * 8
+    plan = solve_lp(horizon(prices, exports, load=0.05), BATTERY, None, NIGHT * 2.0)
+    for period in plan.periods:
+        assert not (period.export_from_battery_kwh > 0 and period.grid_charge_kwh > 0)
 
 
 def test_the_kwh_goes_wherever_it_pays_most():
@@ -111,9 +133,17 @@ def test_the_kwh_goes_wherever_it_pays_most():
     """
     prices = [DAY] * 4 + [NIGHT] * 4
     exports = [11.5] * 8
-    plan = solve_lp(horizon(prices, exports, load=0.3), BATTERY, None, 1.0)
+    # small load, so there is spare inverter capacity to sell at all -
+    # with a big load the house absorbs everything and the question does
+    # not arise (see test_only_spare_inverter_capacity_reaches_the_grid)
+    plan = solve_lp(horizon(prices, exports, load=0.05), BATTERY, None, 1.0)
     dear, cheap = plan.periods[:4], plan.periods[4:]
-    assert all(p.discharge_to_load_kwh > 0 and p.export_from_battery_kwh == 0 for p in dear)
+    # The claim is about where the LOAD's energy comes from. Spare
+    # capacity is sold in both halves - it would otherwise just sit - so
+    # "exports nothing" is not the dear-half signature; "serves the house
+    # itself" is.
+    assert all(p.discharge_to_load_kwh > 0 for p in dear), "12.50 saved beats 11.50 earned"
+    assert all(p.discharge_to_load_kwh == 0 for p in cheap), "11.50 earned beats 10.51 saved"
     assert all(p.export_from_battery_kwh > 0 for p in cheap)
     # never sell below what the same quarter is paying to import
     for period in plan.periods:
@@ -205,9 +235,11 @@ def test_a_small_spike_now_does_not_burn_the_cycle_a_big_one_needs():
     prices = [NIGHT] * 96
     exports = [2.0] * 96
     exports[8:16] = [21.5] * 8  # tonight: clears the gate, modestly
-    exports[80:96] = [34.7] * 16  # tomorrow evening: takes the whole pack
+    # tomorrow evening, long enough to take the whole pack at the spare
+    # rate that is left after the load
+    exports[64:96] = [34.7] * 32
     plan = solve_lp(horizon(prices, exports, load=0.05), no_charging, None, NIGHT * 2.0)
     early = sum(p.export_from_battery_kwh for p in plan.periods[8:16])
-    late = sum(p.export_from_battery_kwh for p in plan.periods[80:96])
+    late = sum(p.export_from_battery_kwh for p in plan.periods[64:96])
     assert late > 0
     assert early == 0, "sold into the small spike and had nothing left for the big one"

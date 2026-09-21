@@ -75,21 +75,35 @@ def _balance_target(
 
 
 def _export_allowance(
-    discharge_step: float, export_cents: float, gate_cents: float | None
+    discharge_step: float,
+    export_cents: float,
+    gate_cents: float | None,
+    net_load_kwh: float,
+    discharge_eff: float,
 ) -> float:
-    """How much buffer may be sold to the grid in this quarter.
+    """How much buffer may be SOLD to the grid in this quarter.
 
-    All-or-nothing on purpose: the gate decides *whether* selling is
-    permitted here, never what it is worth. Inside a permitted quarter
-    the objective compares selling against self-use on price alone (both
-    already carry the same cycle cost), which is the comparison the owner
-    cares about - with a fixed purchase price and a spot sell price, a
-    stored kWh belongs wherever it earns most, and the wear is sunk
-    either way. ``None`` disables selling entirely.
+    Two things decide it. The gate says whether selling is permitted at
+    all - a permission, never a price signal, so that inside a permitted
+    quarter the objective still compares selling against self-use on
+    price alone (both carry the same cycle cost, which cancels).
+
+    The second is physics, and it is the binding one here. There is ONE
+    meter: the battery's output serves the house before anything reaches
+    the grid, and import and export net out within the interval. Only the
+    inverter capacity left over after covering the load can be sold, so
+    the cap is the discharge rate MINUS the load, not the discharge rate.
+    Modelling those as two independent books credited a sale at the spike
+    price while separately billing the house's import - a trade that
+    cannot physically happen (owner spotted it, 2026-09-21).
+
+    At this site the difference is the whole feature: 1.25 kW of
+    discharge against an evening load of 1.0-2.5 kW leaves nothing to
+    sell exactly when the price peaks.
     """
     if gate_cents is None or export_cents < gate_cents:
         return 0.0
-    return discharge_step
+    return max(0.0, discharge_step - net_load_kwh / discharge_eff)
 
 
 def _add_balance_rows(solver, highspy, n: int, target: float, si, bi) -> None:
@@ -242,8 +256,12 @@ def solve_lp(
         upper[di(t)] = min(discharge_step, net_load[t] / DISCHARGE_EFF)
         upper[si(t)] = capacity
         upper[xi(t)] = _export_allowance(
-            discharge_step, export[t], export_gate_cents
+            discharge_step, export[t], export_gate_cents, net_load[t], DISCHARGE_EFF
         )
+        if upper[xi(t)] > 0.0:
+            # one meter again: buying and selling in the same quarter is
+            # not a round trip, it is two numbers that cancel
+            upper[gi(t)] = 0.0
         if balancing:
             upper[bi(t)] = 1.0
         # import cost: grid charge buys g/eff at price; discharge saves
@@ -571,8 +589,10 @@ def solve_joint(
         upper[Ti(t)] = temp_ceiling[t]
         upper[wi(t)] = min(surplus[t], tank_kwh_q)
         upper[xi(t)] = _export_allowance(
-            discharge_step, export[t], export_gate_cents
+            discharge_step, export[t], export_gate_cents, net_load[t], DISCHARGE_EFF
         )
+        if upper[xi(t)] > 0.0:
+            upper[gi(t)] = 0.0
         cost[gi(t)] = price[t] / CHARGE_EFF
         cost[di(t)] = DISCHARGE_EFF * (CYCLE_COST_CENTS_PER_KWH - price[t])
         # selling: same cycle cost, revenue in place of avoided import
